@@ -75,7 +75,8 @@ The desktop GUI is available on:
   for Debian/Ubuntu-based distributions.
 
 macOS currently does **not** have an official desktop installer.
-macOS users can build and run the command-line version from source.
+macOS users can build both the CLI and the desktop app from source: use `cargo build --release -p babel-ebook-cli`
+for the CLI, or run `pnpm install && pnpm tauri build` inside `desktop/` to produce an `.app` and `.dmg`.
 
 ---
 

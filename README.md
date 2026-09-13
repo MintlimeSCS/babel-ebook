@@ -34,7 +34,7 @@
   <a href="https://github.com/nevertiree/babel-ebook/releases/latest">
     <img src="https://img.shields.io/badge/Linux-Download-E95420?logo=linux&logoColor=white" alt="Download for Linux">
   </a>
-  <img src="https://img.shields.io/badge/macOS-CLI%20only-silver?logo=apple&logoColor=white" alt="macOS CLI only">
+  <img src="https://img.shields.io/badge/macOS-source-only-silver?logo=apple&logoColor=white" alt="macOS source only">
 </p>
 
 <p>
@@ -112,7 +112,7 @@ cargo run --release -p babel-ebook-cli -- input.epub -o output.epub \
 
 - **Windows 10/11**：推荐 `.exe`（NSIS）安装包，另提供 `.msi`。
 - **Linux**：提供 `.AppImage`（免安装）和 `.deb`（Debian/Ubuntu）。
-- **macOS**：暂无官方桌面安装包，可通过 CLI 从源码编译使用。
+- **macOS**：暂无官方桌面安装包；CLI 与桌面版均可从源码编译（`cd desktop && pnpm install && pnpm tauri build` 生成 `.app`）。
 
 详细平台说明见 [docs/README.md](docs/README.md)。
 

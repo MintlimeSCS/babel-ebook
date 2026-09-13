@@ -73,8 +73,9 @@
 - **Linux**: `.AppImage`（ポータブル、ダブルクリックで実行）およびDebian/Ubuntu系ディストリビューション用の`.deb`
   パッケージ。
 
-macOSには現在、公式のデスクトップインストーラーはありません。macOSユーザーはソースからコマンドライン版を
-ビルドして実行できます。
+macOSには現在、公式のデスクトップインストーラーはありません。macOSユーザーはソースからCLIとデスクトップ版の
+両方をビルドできます。CLIは`cargo build --release -p babel-ebook-cli`、デスクトップ版は`desktop/`ディレクトリで
+`pnpm install && pnpm tauri build`を実行すると`.app`と`.dmg`が生成されます。
 
 ---
 
