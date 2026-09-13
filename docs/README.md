@@ -70,7 +70,9 @@
 - **Windows**（推荐）：安装包为 `.exe`（NSIS）和 `.msi`（MSI）。
 - **Linux**：提供 `.AppImage`（免安装，双击运行）和 `.deb`（Debian/Ubuntu 系列）安装包。
 
-macOS 目前**没有官方桌面安装包**。macOS 用户可以使用命令行版本（CLI），但需要自行从源码编译。
+macOS 目前**没有官方桌面安装包**。macOS 用户可以从源码自行编译 CLI 或桌面版：CLI 使用
+`cargo build --release -p babel-ebook-cli`；桌面版在 `desktop/` 目录运行 `pnpm install && pnpm tauri build`，
+即可生成 `.app` 与 `.dmg`。
 
 ---
 

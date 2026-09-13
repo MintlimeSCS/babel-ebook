@@ -89,7 +89,8 @@ La aplicación de escritorio está disponible en:
   para distribuciones basadas en Debian/Ubuntu.
 
 macOS actualmente **no** tiene un instalador de escritorio oficial.
-Los usuarios de macOS pueden compilar y ejecutar la versión de línea de comandos desde el código fuente.
+Los usuarios de macOS pueden compilar desde el código fuente tanto la CLI (`cargo build --release -p babel-ebook-cli`)
+como la aplicación de escritorio (`pnpm install && pnpm tauri build` dentro de `desktop/`, que genera `.app` y `.dmg`).
 
 ---
 

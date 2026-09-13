@@ -81,7 +81,8 @@
   `.deb` 패키지.
 
 macOS에는 공식 데스크톱 설치 프로그램이 **없습니다**.
-macOS 사용자는 소스에서 명령줄 버전을 직접 빌드해 실행할 수 있습니다.
+macOS 사용자는 소스에서 CLI와 데스크톱 앱을 모두 빌드할 수 있습니다: CLI는 `cargo build --release -p babel-ebook-cli`,
+데스크톱 앱은 `desktop/` 디렉터리에서 `pnpm install && pnpm tauri build`를 실행하면 `.app`과 `.dmg`가 생성됩니다.
 
 ---
 
