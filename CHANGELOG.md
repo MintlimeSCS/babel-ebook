@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased — consolidated translation repair
+## Unreleased — EPUB formatting fallback and rate-limit coordination
+
+- Preserve empty page anchors as opaque elements; recover altered inline
+  markers by translating all text runs in one structured request while keeping
+  marker positions locally. Switch the rest of that chapter to structured mode
+  after its first marker failure, limiting repair overhead to one extra request
+  per chapter. Apply the same guarded fallback to optional refinement.
+- Coordinate OpenAI-compatible requests by endpoint/model across chapters and
+  jobs; pace requests using advertised limits, honor Retry-After/reset headers
+  and retry temporary 429s up to the original three-retry limit. Do not retry billing/auth/invalid
+  request errors. Avoid nested SDK retries for all model families.
+- Reject truncated/refused responses before caching; make API waits cancellable.
+- Retain valid existing caches and completed checkpoints when settings match.
+- Add offline structure verification and local HTTP regression coverage.
+
+## Previous — consolidated translation repair
 
 - GPT-5 Chat Completions requests use `max_completion_tokens` and omit sampling
   temperature. Other model families retain their existing parameter handling.

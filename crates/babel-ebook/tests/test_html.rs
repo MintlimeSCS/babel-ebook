@@ -272,7 +272,8 @@ async fn process_document_ignores_skipped_descendants_when_checking_children() {
     // Make both <div> and <p> translatable.
     config.translate_tags = vec!["p".into(), "div".into()];
     // The only <p> descendant of the <div> is inside a skipped <pre>.
-    // The <div> should still be translated because the skipped <p> is ignored.
+    // The <div> is still selected because the skipped <p> is ignored.
+    // Its protected-only content is copied locally without an API call.
     let html = r#"<html><body><div><pre><p>code</p></pre></div></body></html>"#;
 
     let out = process_document(
@@ -290,8 +291,8 @@ async fn process_document_ignores_skipped_descendants_when_checking_children() {
     let out_str = String::from_utf8(out).expect("valid UTF-8");
 
     assert!(
-        out_str.contains("<div lang=\"zh-CN\">[ZH] <pre><p>code</p></pre></div>"),
-        "outer div should be translated: {}",
+        out_str.contains("<div lang=\"zh-CN\"><pre><p>code</p></pre></div>"),
+        "outer div should preserve its protected-only content: {}",
         out_str
     );
     assert!(

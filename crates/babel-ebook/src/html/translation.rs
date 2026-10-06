@@ -7,8 +7,142 @@ use crate::core::{BabelEbookError, CancellationToken, ProgressCallback};
 use crate::translator::{TranslateContext, Translator};
 use sha2::{Digest, Sha256};
 
-use super::markup::{marker_regex, validate_markers};
+use super::markup::{marker_regex, validate_markers, MARKUP_PROMPT};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Default)]
+pub(super) struct FormattingState {
+    structured: AtomicBool,
+}
 use super::progress::emit_chunk_progress;
+
+async fn cancellable_translate(
+    text: &str,
+    translator: &dyn Translator,
+    context: &TranslateContext<'_>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<String, BabelEbookError> {
+    if let Some(token) = cancellation {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => Err(BabelEbookError::Cancelled),
+            result = translator.translate(text, context) => result,
+        }
+    } else {
+        translator.translate(text, context).await
+    }
+}
+
+/// Switch a chapter to one-call structured translation after its first marker
+/// failure. This adds at most one repair request per chapter, never one request
+/// per text run; subsequent marked paragraphs use structured translation first.
+async fn translate_guarded(
+    chunk: &str,
+    translator: &dyn Translator,
+    context: &TranslateContext<'_>,
+    max_input_tokens: usize,
+    cancellation: Option<&CancellationToken>,
+    formatting: &FormattingState,
+) -> Result<String, BabelEbookError> {
+    if !marker_regex()
+        .replace_all(chunk, "")
+        .chars()
+        .any(char::is_alphabetic)
+    {
+        return Ok(chunk.to_string());
+    }
+    let has_markers = marker_regex().is_match(chunk);
+    if !has_markers || !formatting.structured.load(Ordering::Relaxed) {
+        let result = cancellable_translate(chunk, translator, context, cancellation).await?;
+        if validate_markers(chunk, &result).is_ok() {
+            return Ok(result);
+        }
+        if !has_markers {
+            validate_markers(chunk, &result)?;
+        }
+        formatting.structured.store(true, Ordering::Relaxed);
+        tracing::warn!("Model changed inline markers; using one structured request per paragraph for the rest of this chapter");
+    }
+    translate_structured(chunk, translator, context, max_input_tokens, cancellation).await
+}
+
+async fn translate_structured(
+    chunk: &str,
+    translator: &dyn Translator,
+    context: &TranslateContext<'_>,
+    max_input_tokens: usize,
+    cancellation: Option<&CancellationToken>,
+) -> Result<String, BabelEbookError> {
+    // Split locally, but send ALL meaningful text runs together in one request.
+    // Markers, numeric-only runs, whitespace, code and images never reach the model.
+    let mut runs = Vec::new();
+    let mut markers = Vec::new();
+    let mut end = 0;
+    for marker in marker_regex().find_iter(chunk) {
+        runs.push(&chunk[end..marker.start()]);
+        markers.push(marker.as_str());
+        end = marker.end();
+    }
+    runs.push(&chunk[end..]);
+    let meaningful: Vec<_> = runs
+        .iter()
+        .filter(|text| text.chars().any(char::is_alphabetic))
+        .map(|text| text.trim())
+        .collect();
+    if meaningful.is_empty() {
+        return Ok(chunk.to_string());
+    }
+    let payload = serde_json::to_string(&meaningful).expect("text runs serialize");
+    let prompt = format!("{}\nInput is an ordered JSON array of text fragments from one paragraph. Translate every string using the entire array as context. Return ONLY a valid JSON array of the same number of strings in the same order, with no omissions, merging, commentary or code fence. Preserve each fragment boundary.", context.system_prompt.replace(MARKUP_PROMPT, ""));
+    if count_tokens(&prompt)
+        .saturating_add(count_tokens(&payload))
+        .saturating_add(32)
+        > max_input_tokens
+    {
+        return Err(BabelEbookError::ApiError("Protected formatting repair exceeds the configured input-token budget; no extra request was sent".into()));
+    }
+    let repair_context = TranslateContext {
+        system_prompt: &prompt,
+        target_lang: context.target_lang,
+    };
+    let response =
+        cancellable_translate(&payload, translator, &repair_context, cancellation).await?;
+    let response = response.trim();
+    // Accept a surrounding code fence without relaxing structural validation.
+    let json = response.strip_prefix("```").map_or(response, |fenced| {
+        fenced
+            .split_once('\n')
+            .and_then(|(_, body)| body.trim().strip_suffix("```"))
+            .unwrap_or(response)
+            .trim()
+    });
+    let translated: Vec<String> = serde_json::from_str(json).map_err(|_| {
+        BabelEbookError::ApiError("The model changed formatting markers and its single structured repair was invalid; no further repair requests were sent".into())
+    })?;
+    if translated.len() != meaningful.len() || translated.iter().any(|t| t.trim().is_empty()) {
+        return Err(BabelEbookError::ApiError("The model changed formatting markers and its single structured repair omitted text; no further repair requests were sent".into()));
+    }
+    let mut translated = translated.iter();
+    let mut output = String::new();
+    for (index, run) in runs.iter().enumerate() {
+        if run.chars().any(char::is_alphabetic) {
+            let text = translated.next().expect("validated run count").trim();
+            validate_markers("", text)?;
+            let start = run.len() - run.trim_start().len();
+            let end = run.trim_end().len();
+            output.push_str(&run[..start]);
+            output.push_str(text);
+            output.push_str(&run[end..]);
+        } else {
+            output.push_str(run);
+        }
+        if let Some(marker) = markers.get(index) {
+            output.push_str(marker);
+        }
+    }
+    validate_markers(chunk, &output)?;
+    Ok(output)
+}
 
 fn cache_scope(
     translator: &dyn Translator,
@@ -16,7 +150,7 @@ fn cache_scope(
     prompt: &str,
     phase: &str,
 ) -> String {
-    // v2 deliberately ignores legacy cache files, which were not language/prompt scoped.
+    // v2 excludes legacy caches that were not scoped to language/prompt settings.
     // Only translation settings are hashed; credentials never enter cache keys or files.
     let settings = serde_json::json!([
         translator.cache_identity(),
@@ -86,6 +220,32 @@ pub async fn translate_text(
     progress: Option<&dyn ProgressCallback>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<String, BabelEbookError> {
+    translate_text_with_state(
+        text,
+        translator,
+        options,
+        cache,
+        chapter_index,
+        chapter_href,
+        progress,
+        cancellation,
+        &FormattingState::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) async fn translate_text_with_state(
+    text: &str,
+    translator: &dyn Translator,
+    options: &TranslationOptions,
+    cache: &TranslationCache,
+    chapter_index: usize,
+    chapter_href: &str,
+    progress: Option<&dyn ProgressCallback>,
+    cancellation: Option<&CancellationToken>,
+    formatting: &FormattingState,
+) -> Result<String, BabelEbookError> {
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Err(BabelEbookError::Cancelled);
     }
@@ -135,7 +295,15 @@ pub async fn translate_text(
                 system_prompt: &system_prompt,
                 target_lang,
             };
-            let result = translator.translate(chunk, &context).await?;
+            let result = translate_guarded(
+                chunk,
+                translator,
+                &context,
+                options.max_input_tokens,
+                cancellation,
+                formatting,
+            )
+            .await?;
             validate_markers(chunk, &result)?;
             let tokens = count_tokens(chunk) + count_tokens(&result);
             cache
@@ -186,7 +354,15 @@ pub async fn translate_text(
             system_prompt: &refine_prompt,
             target_lang,
         };
-        let result = translator.translate(chunk, &context).await?;
+        let result = translate_guarded(
+            chunk,
+            translator,
+            &context,
+            options.max_input_tokens,
+            cancellation,
+            formatting,
+        )
+        .await?;
         validate_markers(chunk, &result)?;
         let tokens = count_tokens(chunk) + count_tokens(&result);
         cache

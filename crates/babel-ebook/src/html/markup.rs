@@ -74,7 +74,7 @@ impl ProtectedContent {
             matches!(e.name.local.as_ref(), "br" | "img" | "hr" | "svg" | "math")
                 || SKIPPED_ANCESTORS.contains(&e.name.local.as_ref())
                 || skip.contains(&node_ptr(node))
-        });
+        }) || node.text_contents().trim().is_empty();
         if opaque {
             write!(self.text, "[[BABEL:{id}:KEEP]]").expect("string write");
         } else {

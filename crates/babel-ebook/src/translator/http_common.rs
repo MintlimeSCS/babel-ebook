@@ -8,11 +8,13 @@
 
 use crate::core::BabelEbookError;
 use async_openai::config::{Config, OpenAIConfig};
-use async_openai::types::{CreateChatCompletionRequest, CreateChatCompletionResponse};
 use async_openai::Client;
-use reqwest::StatusCode;
+use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::Value;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
+use tokio::time::Instant;
 
 /// Timeout for a single translation request.
 pub const TRANSLATE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -117,6 +119,7 @@ fn build_chat_completion_request(
 ///
 /// This helper builds the standard system/user message request, applies the
 /// translate timeout, retries on failure, and extracts the first choice content.
+#[allow(clippy::significant_drop_tightening)] // The queue lock intentionally covers HTTP and retries.
 pub async fn openai_compatible_translate(
     client: &Client<OpenAIConfig>,
     model: &str,
@@ -128,68 +131,269 @@ pub async fn openai_compatible_translate(
 ) -> Result<String, BabelEbookError> {
     let request =
         build_chat_completion_request(model, system_prompt, text, max_tokens, temperature);
-    let is_gpt5 = request.get("max_completion_tokens").is_some();
+    // One gate per endpoint/model across chapters and jobs. Keeping the gate
+    // through retries prevents every concurrent chapter from hitting the same
+    // exhausted token bucket. No credentials are used as map keys or persisted.
+    let gate = request_gate(&client.config().url("/chat/completions"), model);
+    let budget = crate::chunking::count_tokens(system_prompt)
+        .saturating_add(crate::chunking::count_tokens(text))
+        .saturating_add(max_tokens as usize)
+        .saturating_add(32);
+    let mut schedule = gate.lock().await;
     let http_client = build_reqwest_client();
-
-    with_retry(provider_name, "API", || {
-        let request = request.clone();
-        let http_client = &http_client;
-        async move {
-            let operation = async {
-                if is_gpt5 {
-                    // async-openai 0.26 lacks max_completion_tokens; send this
-                    // request as JSON while retaining its endpoint and headers.
-                    let response = http_client
-                        .post(client.config().url("/chat/completions"))
-                        .headers(client.config().headers())
-                        .json(&request)
-                        .send()
-                        .await
-                        .map_err(|e| BabelEbookError::ApiError(e.to_string()))?;
-                    let status = response.status();
-                    if !status.is_success() {
-                        let body = response.text().await.unwrap_or_default();
-                        return Err(format_http_error(provider_name, status, &body));
-                    }
-                    response
-                        .json::<CreateChatCompletionResponse>()
-                        .await
-                        .map_err(|e| BabelEbookError::ApiError(e.to_string()))
-                } else {
-                    let request: CreateChatCompletionRequest = serde_json::from_value(request)
-                        .map_err(|e| BabelEbookError::ApiError(e.to_string()))?;
-                    client
-                        .chat()
-                        .create(request)
-                        .await
-                        .map_err(|e| BabelEbookError::ApiError(e.to_string()))
-                }
-            };
-            let response = tokio::time::timeout(TRANSLATE_TIMEOUT, operation)
-                .await
-                .map_err(|_| {
-                    BabelEbookError::ApiError(format!("{provider_name} request timed out"))
-                })??;
-
-            let content = response
-                .choices
-                .into_iter()
-                .next()
-                .and_then(|choice| choice.message.content)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-
-            if content.is_empty() {
-                return Err(BabelEbookError::ApiError(format!(
-                    "{provider_name} API returned empty content"
-                )));
-            }
-
-            Ok(content)
+    for attempt in 0..=RATE_LIMIT_RETRIES {
+        if schedule.next_send.saturating_duration_since(Instant::now()) > MAX_RATE_LIMIT_WAIT {
+            return Err(BabelEbookError::ApiError(format!(
+                "{provider_name} rate-limit wait exceeds five minutes; retry the job later"
+            )));
         }
+        tokio::time::sleep_until(schedule.next_send).await;
+        let response = http_client
+            .post(client.config().url("/chat/completions"))
+            .headers(client.config().headers())
+            .json(&request)
+            .timeout(TRANSLATE_TIMEOUT)
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                if attempt >= MAX_RETRIES {
+                    return Err(BabelEbookError::ApiError(error.to_string()));
+                }
+                schedule.defer(Duration::from_secs(2_u64.pow(attempt)));
+                continue;
+            }
+        };
+        let status = response.status();
+        let headers = response.headers().clone();
+        schedule.observe(&headers, budget);
+        let body = response.text().await.map_err(|error| {
+            BabelEbookError::ApiError(format!("{provider_name} response read failed: {error}"))
+        })?;
+        if status.is_success() {
+            return extract_chat_content(&body, provider_name);
+        }
+        let error = format_http_error(provider_name, status, &body);
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            // Billing/quota failures cannot be solved by repeatedly waiting.
+            if is_quota_error(&body) {
+                return Err(error);
+            }
+            let delay = rate_limit_delay(&headers, &body, attempt);
+            // Do not shorten a server-provided wait. Very long waits are returned
+            // as errors so a job cannot appear frozen for hours.
+            schedule.defer(delay);
+            if attempt == RATE_LIMIT_RETRIES || delay > MAX_RATE_LIMIT_WAIT {
+                return Err(error);
+            }
+            tracing::warn!(
+                provider = provider_name,
+                wait_seconds = delay.as_secs_f64(),
+                "Rate limit reached; pausing shared request queue before retry"
+            );
+        } else if (status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT)
+            && attempt < MAX_RETRIES
+        {
+            schedule.defer(Duration::from_secs(2_u64.pow(attempt)));
+        } else {
+            // Authentication, unsupported parameters and other permanent 4xx
+            // errors fail immediately, without SDK or outer retry multiplication.
+            return Err(error);
+        }
+    }
+    unreachable!("bounded retry loop returns on its last attempt")
+}
+
+const RATE_LIMIT_RETRIES: u32 = MAX_RETRIES;
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(300);
+
+type SharedSchedule = Arc<tokio::sync::Mutex<RequestSchedule>>;
+
+struct RequestSchedule {
+    next_send: Instant,
+}
+
+impl RequestSchedule {
+    fn defer(&mut self, delay: Duration) {
+        self.next_send = self.next_send.max(Instant::now() + delay);
+    }
+
+    fn observe(&mut self, headers: &HeaderMap, budget: usize) {
+        let budget = f64::from(u32::try_from(budget).unwrap_or(u32::MAX));
+        // Smooth the request rate once the server advertises limits, rather
+        // than using all available tokens immediately at the start of a minute.
+        for (limit, remaining, reset, needed) in [
+            (
+                "x-ratelimit-limit-tokens",
+                "x-ratelimit-remaining-tokens",
+                "x-ratelimit-reset-tokens",
+                budget,
+            ),
+            (
+                "x-ratelimit-limit-project-tokens",
+                "x-ratelimit-remaining-project-tokens",
+                "x-ratelimit-reset-project-tokens",
+                budget,
+            ),
+            (
+                "x-ratelimit-limit-requests",
+                "x-ratelimit-remaining-requests",
+                "x-ratelimit-reset-requests",
+                1.0,
+            ),
+        ] {
+            if let Some(capacity) = header_number(headers, limit).filter(|v| *v > 0.0) {
+                self.defer(Duration::from_secs_f64(
+                    (60.0 * needed / capacity * 1.1).min(300.0),
+                ));
+            }
+            if header_number(headers, remaining).is_some_and(|available| available < needed) {
+                if let Some(wait) = header_duration(headers, reset) {
+                    self.defer(wait + Duration::from_millis(250));
+                }
+            }
+        }
+    }
+}
+
+fn request_gate(endpoint: &str, model: &str) -> SharedSchedule {
+    static GATES: OnceLock<Mutex<HashMap<(String, String), SharedSchedule>>> = OnceLock::new();
+    let mut gates = GATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("request gate map");
+    gates
+        .entry((endpoint.into(), model.into()))
+        .or_insert_with(|| {
+            Arc::new(tokio::sync::Mutex::new(RequestSchedule {
+                next_send: Instant::now(),
+            }))
+        })
+        .clone()
+}
+
+fn header_number(headers: &HeaderMap, name: &str) -> Option<f64> {
+    headers
+        .get(name)?
+        .to_str()
+        .ok()?
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+fn parse_duration(value: &str) -> Option<Duration> {
+    static DURATION: OnceLock<regex::Regex> = OnceLock::new();
+    if let Ok(seconds) = value.trim().parse::<f64>() {
+        return (seconds.is_finite() && (0.0..=86400.0).contains(&seconds))
+            .then(|| Duration::from_secs_f64(seconds));
+    }
+    let pattern = DURATION
+        .get_or_init(|| regex::Regex::new(r"(\d+(?:\.\d+)?)(ms|s|m|h)").expect("duration regex"));
+    let mut end = 0;
+    let mut seconds = 0.0;
+    for captures in pattern.captures_iter(value.trim()) {
+        let token = captures.get(0)?;
+        if token.start() != end {
+            return None;
+        }
+        let number: f64 = captures[1].parse().ok()?;
+        seconds = number.mul_add(
+            match &captures[2] {
+                "ms" => 0.001,
+                "s" => 1.0,
+                "m" => 60.0,
+                _ => 3600.0,
+            },
+            seconds,
+        );
+        end = token.end();
+    }
+    (end > 0 && end == value.trim().len() && seconds.is_finite() && seconds <= 86400.0)
+        .then(|| Duration::from_secs_f64(seconds))
+}
+
+fn header_duration(headers: &HeaderMap, name: &str) -> Option<Duration> {
+    parse_duration(headers.get(name)?.to_str().ok()?)
+}
+
+fn rate_limit_delay(headers: &HeaderMap, body: &str, attempt: u32) -> Duration {
+    static WAIT: OnceLock<regex::Regex> = OnceLock::new();
+    let retry_after = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            parse_duration(v).or_else(|| {
+                httpdate::parse_http_date(v)
+                    .ok()
+                    .map(|date| date.duration_since(SystemTime::now()).unwrap_or_default())
+            })
+        });
+    let milliseconds = header_number(headers, "retry-after-ms")
+        .filter(|v| *v <= 86_400_000.0)
+        .map(|v| Duration::from_secs_f64(v / 1000.0));
+    let json: Value = serde_json::from_str(body).unwrap_or_default();
+    let message = json["error"]["message"].as_str().unwrap_or(body);
+    let pattern = WAIT.get_or_init(|| {
+        regex::Regex::new(r"(?i)try again in ([0-9.]+(?:ms|s|m|h))").expect("wait regex")
+    });
+    let body_wait = pattern
+        .captures(message)
+        .and_then(|c| parse_duration(&c[1]));
+    let wait = [
+        retry_after,
+        milliseconds,
+        body_wait,
+        header_duration(headers, "x-ratelimit-reset-tokens"),
+        header_duration(headers, "x-ratelimit-reset-project-tokens"),
+        header_duration(headers, "x-ratelimit-reset-requests"),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or_else(|| Duration::from_secs(5 * 2_u64.pow(attempt.min(5))));
+    wait.max(Duration::from_millis(500)) + Duration::from_millis(250)
+}
+
+fn is_quota_error(body: &str) -> bool {
+    let json: Value = serde_json::from_str(body).unwrap_or_default();
+    ["code", "type"].iter().any(|field| {
+        matches!(
+            json["error"][field].as_str(),
+            Some("insufficient_quota" | "billing_hard_limit_reached")
+        )
     })
-    .await
+}
+
+fn extract_chat_content(body: &str, provider: &str) -> Result<String, BabelEbookError> {
+    let response: Value =
+        serde_json::from_str(body).map_err(|error| BabelEbookError::ApiError(error.to_string()))?;
+    let choice = &response["choices"][0];
+    if choice["finish_reason"] == "content_filter"
+        || choice["message"]["refusal"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    {
+        return Err(BabelEbookError::ApiError(format!(
+            "{provider} declined this translation; no partial response was cached"
+        )));
+    }
+    if choice["finish_reason"] == "length" {
+        return Err(BabelEbookError::ApiError(format!(
+            "{provider} output reached its token limit and was truncated; increase maximum output tokens or reduce chunk size. No truncated translation was cached."
+        )));
+    }
+    let content = choice["message"]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .trim();
+    if content.is_empty() {
+        return Err(BabelEbookError::ApiError(format!(
+            "{provider} API returned empty content"
+        )));
+    }
+    Ok(content.to_string())
 }
 
 /// Perform a lightweight health check against an OpenAI-compatible `/models`
@@ -385,5 +589,216 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("Provider op failed after 3 retries"));
         assert!(msg.contains("always fails"));
+    }
+
+    #[test]
+    fn duration_parser_handles_openai_units_and_rejects_invalid_values() {
+        for (value, ms) in [
+            ("415ms", 415),
+            ("1.5s", 1500),
+            ("1m2.5s", 62_500),
+            ("2h", 7_200_000),
+        ] {
+            assert_eq!(parse_duration(value).unwrap().as_millis(), ms);
+        }
+        for value in ["", "NaN", "inf", "-1", "oops1s", "1sXXX", "999999h"] {
+            assert!(parse_duration(value).is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn rate_limit_delay_uses_headers_body_and_bounded_backoff() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "2".parse().unwrap());
+        headers.insert("retry-after-ms", "2500".parse().unwrap());
+        headers.insert("x-ratelimit-reset-tokens", "1m2s".parse().unwrap());
+        assert_eq!(
+            rate_limit_delay(&headers, "{}", 0),
+            Duration::from_millis(62_250)
+        );
+        assert_eq!(
+            rate_limit_delay(
+                &HeaderMap::new(),
+                r#"{"error":{"message":"Please try again in 415ms."}}"#,
+                0
+            ),
+            Duration::from_millis(750)
+        );
+        assert_eq!(
+            rate_limit_delay(&HeaderMap::new(), "{}", 1),
+            Duration::from_millis(10_250)
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "retry-after",
+            httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(20))
+                .parse()
+                .unwrap(),
+        );
+        assert!(rate_limit_delay(&headers, "{}", 0) >= Duration::from_secs(19));
+    }
+
+    #[test]
+    fn quota_truncation_and_refusal_are_rejected() {
+        assert!(is_quota_error(r#"{"error":{"code":"insufficient_quota"}}"#));
+        assert!(!is_quota_error(
+            r#"{"error":{"code":"rate_limit_exceeded"}}"#
+        ));
+        assert!(extract_chat_content(
+            r#"{"choices":[{"message":{"content":"partial"},"finish_reason":"length"}]}"#,
+            "OpenAI"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("truncated"));
+        assert!(extract_chat_content(
+            r#"{"choices":[{"message":{"content":"partial"},"finish_reason":"content_filter"}]}"#,
+            "OpenAI"
+        )
+        .is_err());
+        assert_eq!(
+            extract_chat_content(
+                r#"{"choices":[{"message":{"content":" 完整譯文 "},"finish_reason":"stop"}]}"#,
+                "OpenAI"
+            )
+            .unwrap(),
+            "完整譯文"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn schedule_paces_tokens_and_observes_exhausted_request_bucket() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-limit-tokens", "200000".parse().unwrap());
+        headers.insert("x-ratelimit-remaining-tokens", "100".parse().unwrap());
+        headers.insert("x-ratelimit-reset-tokens", "2s".parse().unwrap());
+        let start = Instant::now();
+        let mut schedule = RequestSchedule { next_send: start };
+        schedule.observe(&headers, 4000);
+        assert_eq!(
+            schedule.next_send.duration_since(start),
+            Duration::from_millis(2250)
+        );
+        headers.insert("x-ratelimit-remaining-tokens", "10000".parse().unwrap());
+        let mut schedule = RequestSchedule { next_send: start };
+        schedule.observe(&headers, 4000);
+        assert!(schedule.next_send.duration_since(start).as_secs_f64() >= 1.31);
+    }
+
+    type RecordedCalls = Arc<Mutex<Vec<(Instant, Value)>>>;
+
+    async fn mock_chat_server(
+        responses: Vec<(u16, &'static str, String)>,
+    ) -> (String, RecordedCalls, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let calls: RecordedCalls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let handle = tokio::spawn(async move {
+            for (status, headers, body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                let (header_end, content_length) = loop {
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                        let len: usize = header
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        break (end + 4, len);
+                    }
+                };
+                while bytes.len() < header_end + content_length {
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                }
+                recorded.lock().unwrap().push((
+                    Instant::now(),
+                    serde_json::from_slice(&bytes[header_end..header_end + content_length])
+                        .unwrap(),
+                ));
+                let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, calls, handle)
+    }
+
+    fn successful_chat() -> String {
+        r#"{"choices":[{"message":{"content":"你好"},"finish_reason":"stop"}]}"#.into()
+    }
+
+    #[tokio::test]
+    async fn concurrent_chapters_share_429_wait_and_keep_gpt5_parameters() {
+        let (url, calls, server) = mock_chat_server(vec![
+            (429, "Retry-After: 0.1\r\n", r#"{"error":{"code":"rate_limit_exceeded","message":"Please try again in 100ms."}}"#.into()),
+            (200, "", successful_chat()),
+            (200, "", successful_chat()),
+        ]).await;
+        let client = Client::with_config(
+            OpenAIConfig::new()
+                .with_api_key("fake-key")
+                .with_api_base(url),
+        );
+        let make = || {
+            openai_compatible_translate(
+                &client,
+                "gpt-5.4-mini",
+                "Translate",
+                "Hello",
+                2000,
+                0.2,
+                "OpenAI",
+            )
+        };
+        let (a, b) = tokio::join!(make(), make());
+        assert_eq!(a.unwrap(), "你好");
+        assert_eq!(b.unwrap(), "你好");
+        server.await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[1].0.duration_since(calls[0].0) >= Duration::from_millis(740));
+        for (_, request) in calls.iter() {
+            assert_eq!(request["max_completion_tokens"], 2000);
+            assert!(request.get("max_tokens").is_none());
+            assert!(request.get("temperature").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn quota_and_bad_requests_fail_without_retrying() {
+        for (status, error) in [
+            (429, r#"{"error":{"code":"insufficient_quota"}}"#),
+            (400, r#"{"error":{"code":"unsupported_parameter"}}"#),
+            (401, r#"{"error":{"code":"invalid_api_key"}}"#),
+        ] {
+            let (url, calls, server) = mock_chat_server(vec![(status, "", error.into())]).await;
+            let client = Client::with_config(
+                OpenAIConfig::new()
+                    .with_api_key("fake-key")
+                    .with_api_base(url),
+            );
+            assert!(openai_compatible_translate(
+                &client,
+                "gpt-4o-mini",
+                "Translate",
+                "Hello",
+                2000,
+                0.2,
+                "OpenAI"
+            )
+            .await
+            .is_err());
+            server.await.unwrap();
+            assert_eq!(calls.lock().unwrap().len(), 1);
+        }
     }
 }

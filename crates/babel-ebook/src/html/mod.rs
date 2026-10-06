@@ -98,6 +98,7 @@ pub async fn process_document(
         .and_then(ChapterChunkAdapter::cancellation)
         .or(cancellation);
 
+    let formatting = translation::FormattingState::default();
     for element in elements {
         let node = element.as_node();
         if skip_set.contains(&node_ptr(node)) || is_inside_excluded_subtree(node, &skip_set) {
@@ -118,6 +119,7 @@ pub async fn process_document(
             chapter_href,
             chapter_progress,
             chapter_cancellation,
+            &formatting,
         )
         .await?;
     }
@@ -197,6 +199,7 @@ async fn translate_element_text_and_attributes(
     chapter_href: &str,
     progress: Option<&dyn ProgressCallback>,
     cancellation: Option<&CancellationToken>,
+    formatting: &translation::FormattingState,
 ) -> Result<(), BabelEbookError> {
     let node = element.as_node();
     let tag_name = element.name.local.as_ref();
@@ -209,7 +212,7 @@ async fn translate_element_text_and_attributes(
         let attr_value = element.attributes.borrow().get(attr_name).map(String::from);
         if let Some(value) = attr_value {
             if is_translatable_text(&value) {
-                let translated_attr = translate_text(
+                let translated_attr = translation::translate_text_with_state(
                     &value,
                     translator,
                     options,
@@ -218,6 +221,7 @@ async fn translate_element_text_and_attributes(
                     chapter_href,
                     progress,
                     cancellation,
+                    formatting,
                 )
                 .await
                 .map_err(|err| {
@@ -241,7 +245,7 @@ async fn translate_element_text_and_attributes(
         if is_translatable_text(&text) {
             let protected = ProtectedContent::from_node(node, options)?;
             let markup_options = protected_options(&protected, options, chapter_href);
-            let translated = translate_text(
+            let translated = translation::translate_text_with_state(
                 if protected.has_markup() {
                     protected.text.trim()
                 } else {
@@ -254,6 +258,7 @@ async fn translate_element_text_and_attributes(
                 chapter_href,
                 progress,
                 cancellation,
+                formatting,
             )
             .await
             .map_err(|err| {

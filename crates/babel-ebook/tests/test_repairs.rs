@@ -259,6 +259,7 @@ async fn all_output_modes_preserve_inline_markup_links_and_table_structure() {
 }
 
 struct BrokenMarkers;
+struct InventedMarkers;
 
 #[tokio::test]
 async fn protected_markup_survives_chunking_and_refinement() {
@@ -359,21 +360,25 @@ impl Translator for BrokenMarkers {
     }
     async fn translate(
         &self,
-        _: &str,
+        text: &str,
         _: &TranslateContext<'_>,
     ) -> Result<String, BabelEbookError> {
-        Ok("Removed formatting".into())
+        let markers = regex::Regex::new(r"\[\[BABEL:\d+:(OPEN|CLOSE|KEEP)\]\]").unwrap();
+        Ok(markers
+            .replace_all(text, "")
+            .replace("Hello", "你好")
+            .replace("world", "世界"))
     }
 }
 
 #[tokio::test]
-async fn malformed_model_formatting_is_rejected_and_not_cached() {
+async fn invented_formatting_in_fallback_is_rejected_and_not_cached() {
     let dir = tempfile::tempdir().unwrap();
     let cache = TranslationCache::new(dir.path().into());
     let config = Config::default();
     let result = process_document(
         b"<p>Hello <em>world</em></p>",
-        &BrokenMarkers,
+        &InventedMarkers,
         &config.translation_options(),
         &cache,
         0,
@@ -406,4 +411,215 @@ fn checkpoint_signature_changes_with_settings_and_ignores_credentials() {
         context: None,
     });
     assert_ne!(previous, CheckpointStore::translation_signature(&config));
+}
+
+#[async_trait]
+impl Translator for InventedMarkers {
+    fn name(&self) -> String {
+        "invented".into()
+    }
+    fn max_output_tokens(&self) -> usize {
+        2000
+    }
+    async fn translate(
+        &self,
+        _: &str,
+        _: &TranslateContext<'_>,
+    ) -> Result<String, BabelEbookError> {
+        Ok("[[BABEL:999:KEEP]]譯文".into())
+    }
+}
+
+#[tokio::test]
+async fn missing_markers_fall_back_without_losing_links_images_or_emphasis() {
+    for refine in [false, true] {
+        for mode in [
+            OutputMode::Bilingual,
+            OutputMode::TranslationOnly,
+            OutputMode::Interleaved,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cache = TranslationCache::new(dir.path().into());
+            let config = Config {
+                refine,
+                output_mode: mode,
+                target_lang: "zh-TW".into(),
+                ..Config::default()
+            };
+            let output = process_document(
+                XHTML.as_bytes(),
+                &BrokenMarkers,
+                &config.translation_options(),
+                &cache,
+                0,
+                "ch1",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert_xml(&output);
+            assert!(!output.contains("[[BABEL:"));
+            let doc = kuchiki::parse_html().one(output);
+            assert_eq!(doc.select("#ref").unwrap().count(), 1);
+            assert_eq!(doc.select("#note").unwrap().count(), 1);
+            let translated = doc
+                .select("p[lang='zh-TW']")
+                .unwrap()
+                .find(|p| p.text_contents().contains("[1]"))
+                .unwrap();
+            assert_eq!(
+                translated
+                    .as_node()
+                    .select_first("em")
+                    .unwrap()
+                    .text_contents(),
+                "世界"
+            );
+            assert!(translated.as_node().select_first("br").is_ok());
+            assert_eq!(
+                translated
+                    .as_node()
+                    .select_first("a")
+                    .unwrap()
+                    .attributes
+                    .borrow()
+                    .get("href"),
+                Some("#note")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_page_anchors_are_single_opaque_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = TranslationCache::new(dir.path().into());
+    let translator = RecordingTranslator::default();
+    let config = Config {
+        output_mode: OutputMode::TranslationOnly,
+        ..Config::default()
+    };
+    let output = process_document(
+        b"<h1><a id='page_264'></a><a id='page_265'> </a>Hello world</h1><p>Hello <code>SECRET</code><img src='x.jpg' /></p>",
+        &translator, &config.translation_options(), &cache, 0, "ch1", None, None
+    ).await.unwrap();
+    let doc = kuchiki::parse_html().one(String::from_utf8(output).unwrap());
+    assert!(doc.select_first("#page_264").is_ok());
+    assert!(doc.select_first("#page_265").is_ok());
+    assert_eq!(doc.select_first("code").unwrap().text_contents(), "SECRET");
+    assert_eq!(
+        doc.select_first("img")
+            .unwrap()
+            .attributes
+            .borrow()
+            .get("src"),
+        Some("x.jpg")
+    );
+    let requests = translator.requests.lock().unwrap();
+    assert!(!requests[0].0.contains(":OPEN"));
+    assert_eq!(requests[0].0.matches(":KEEP").count(), 2);
+    assert!(requests.iter().all(|r| !r.0.contains("SECRET")));
+}
+
+#[tokio::test]
+async fn cancellation_interrupts_an_in_flight_translation() {
+    struct WaitingTranslator;
+    #[async_trait]
+    impl Translator for WaitingTranslator {
+        fn name(&self) -> String {
+            "waiting".into()
+        }
+        fn max_output_tokens(&self) -> usize {
+            2000
+        }
+        async fn translate(
+            &self,
+            _: &str,
+            _: &TranslateContext<'_>,
+        ) -> Result<String, BabelEbookError> {
+            std::future::pending().await
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = TranslationCache::new(dir.path().into());
+    let token = babel_ebook::CancellationToken::default();
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        cancel.cancel();
+    });
+    let result = translate_text(
+        "Hello world",
+        &WaitingTranslator,
+        &Config::default().translation_options(),
+        &cache,
+        0,
+        "ch1",
+        None,
+        Some(&token),
+    )
+    .await;
+    assert!(matches!(result, Err(BabelEbookError::Cancelled)));
+}
+
+#[tokio::test]
+async fn many_marker_failures_add_at_most_one_request_per_chapter() {
+    #[derive(Default)]
+    struct CostTracker {
+        calls: Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl Translator for CostTracker {
+        fn name(&self) -> String {
+            "cost-tracker".into()
+        }
+        fn max_output_tokens(&self) -> usize {
+            2000
+        }
+        async fn translate(
+            &self,
+            text: &str,
+            _: &TranslateContext<'_>,
+        ) -> Result<String, BabelEbookError> {
+            self.calls.lock().unwrap().push(text.into());
+            if text.starts_with('[') && !text.starts_with("[[BABEL:") {
+                let runs: Vec<String> = serde_json::from_str(text).unwrap();
+                return Ok(serde_json::to_string(&runs).unwrap());
+            }
+            let re = regex::Regex::new(r"\[\[BABEL:\d+:(OPEN|CLOSE|KEEP)\]\]").unwrap();
+            Ok(re.replace_all(text, "").into_owned())
+        }
+    }
+    for refine in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TranslationCache::new(dir.path().into());
+        let model = CostTracker::default();
+        let config = Config {
+            refine,
+            ..Config::default()
+        };
+        let html = (0..40).map(|i| format!("<p>Unique paragraph {i} <em>emphasis {i}</em> and <a href='#n'>link {i}</a>.</p>")).collect::<String>();
+        process_document(
+            html.as_bytes(),
+            &model,
+            &config.translation_options(),
+            &cache,
+            0,
+            "ch1",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let calls = model.calls.lock().unwrap();
+        let base = if refine { 80 } else { 40 };
+        assert_eq!(
+            calls.len(),
+            base + 1,
+            "no per-run calls or repeated marker attempts"
+        );
+        assert_eq!(calls.iter().filter(|s| s.contains("[[BABEL:")).count(), 1);
+    }
 }
