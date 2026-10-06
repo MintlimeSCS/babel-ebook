@@ -8,11 +8,7 @@
 
 use crate::core::BabelEbookError;
 use async_openai::config::{Config, OpenAIConfig};
-use async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
-};
+use async_openai::types::{CreateChatCompletionRequest, CreateChatCompletionResponse};
 use async_openai::Client;
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -91,6 +87,32 @@ pub fn parse_model_list(json: &Value, array_field: &str, id_field: &str) -> Vec<
         .unwrap_or_default()
 }
 
+/// Build a chat request, using the completion-token limit for GPT-5 models.
+fn build_chat_completion_request(
+    model: &str,
+    system_prompt: &str,
+    text: &str,
+    max_tokens: u32,
+    temperature: f32,
+) -> Value {
+    let is_gpt5 = model == "gpt-5" || model.starts_with("gpt-5-") || model.starts_with("gpt-5.");
+    let mut request = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text},
+        ],
+    });
+    if is_gpt5 {
+        request["max_completion_tokens"] = max_tokens.into();
+        // Omit sampling controls for GPT-5 to avoid model-specific restrictions.
+    } else {
+        request["max_tokens"] = max_tokens.into();
+        request["temperature"] = temperature.into();
+    }
+    request
+}
+
 /// Translate a chunk using an OpenAI-compatible chat completion endpoint.
 ///
 /// This helper builds the standard system/user message request, applies the
@@ -104,32 +126,49 @@ pub async fn openai_compatible_translate(
     temperature: f32,
     provider_name: &str,
 ) -> Result<String, BabelEbookError> {
-    let request = CreateChatCompletionRequest {
-        model: model.to_string(),
-        messages: vec![
-            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content: ChatCompletionRequestSystemMessageContent::Text(system_prompt.to_string()),
-                name: None,
-            }),
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(text.to_string()),
-                name: None,
-            }),
-        ],
-        max_tokens: Some(max_tokens),
-        temperature: Some(temperature),
-        ..Default::default()
-    };
+    let request = build_chat_completion_request(model, system_prompt, text, max_tokens, temperature);
+    let is_gpt5 = request.get("max_completion_tokens").is_some();
+    let http_client = build_reqwest_client();
 
     with_retry(provider_name, "API", || {
         let request = request.clone();
+        let http_client = &http_client;
         async move {
-            let response = tokio::time::timeout(TRANSLATE_TIMEOUT, client.chat().create(request))
+            let operation = async {
+                if is_gpt5 {
+                    // async-openai 0.26 lacks max_completion_tokens; send this
+                    // request as JSON while retaining its endpoint and headers.
+                    let response = http_client
+                        .post(client.config().url("/chat/completions"))
+                        .headers(client.config().headers())
+                        .json(&request)
+                        .send()
+                        .await
+                        .map_err(|e| BabelEbookError::ApiError(e.to_string()))?;
+                    let status = response.status();
+                    if !status.is_success() {
+                        let body = response.text().await.unwrap_or_default();
+                        return Err(format_http_error(provider_name, status, &body));
+                    }
+                    response
+                        .json::<CreateChatCompletionResponse>()
+                        .await
+                        .map_err(|e| BabelEbookError::ApiError(e.to_string()))
+                } else {
+                    let request: CreateChatCompletionRequest = serde_json::from_value(request)
+                        .map_err(|e| BabelEbookError::ApiError(e.to_string()))?;
+                    client
+                        .chat()
+                        .create(request)
+                        .await
+                        .map_err(|e| BabelEbookError::ApiError(e.to_string()))
+                }
+            };
+            let response = tokio::time::timeout(TRANSLATE_TIMEOUT, operation)
                 .await
                 .map_err(|_| {
                     BabelEbookError::ApiError(format!("{provider_name} request timed out"))
-                })?
-                .map_err(|e| BabelEbookError::ApiError(e.to_string()))?;
+                })??;
 
             let content = response
                 .choices
@@ -208,6 +247,37 @@ pub async fn openai_compatible_list_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpt5_requests_serialize_with_completion_limit_only() {
+        for model in [
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5.4-mini",
+            "gpt-5.4-mini-2026-03-17",
+        ] {
+            let request =
+                build_chat_completion_request(model, "Translate faithfully.", "Hello.", 3000, 0.2);
+            let json = serde_json::to_value(request).unwrap();
+            assert_eq!(json["model"], model);
+            assert_eq!(json["max_completion_tokens"], 3000);
+            assert!(json.get("max_tokens").is_none());
+            assert!(json.get("temperature").is_none());
+            assert_eq!(json["messages"][0]["content"], "Translate faithfully.");
+            assert_eq!(json["messages"][1]["content"], "Hello.");
+        }
+    }
+
+    #[test]
+    fn other_models_keep_legacy_request_parameters() {
+        for model in ["gpt-4o-mini", "deepseek-chat", "llama3", "gpt-50-test"] {
+            let request = build_chat_completion_request(model, "Translate.", "Hello.", 3000, 0.2);
+            let json = serde_json::to_value(request).unwrap();
+            assert_eq!(json["max_tokens"], 3000);
+            assert!(json.get("max_completion_tokens").is_none());
+            assert!(json["temperature"].is_number());
+        }
+    }
 
     #[test]
     fn format_http_error_includes_body() {
