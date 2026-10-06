@@ -1,0 +1,43 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+      - name: Test translation core
+        run: cargo test --locked -p babel-ebook --lib
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: pnpm install --frozen-lockfile
+      - name: Build Windows installer
+        working-directory: desktop
+        run: pnpm tauri build --bundles nsis
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: BabelEbook-Windows-GPT5-Fix
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 14
