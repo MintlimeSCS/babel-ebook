@@ -197,6 +197,7 @@ mod tests {
             translate_code: false,
             output_font: None,
             system_prompt: None,
+            glossary: Vec::new(),
             prompts: crate::args::PromptTemplates::default(),
             refine: false,
             checkpoint_dir: ".babel_ebook_checkpoints".to_string(),
