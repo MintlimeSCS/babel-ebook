@@ -7,13 +7,29 @@ const APP_PATH = resolve(__dirname, "../../target/release/babel-ebook-desktop.ex
 
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 let appProcess: ChildProcess | null = null;
 let cdpUrl: string;
+let checkpointDir: string;
 
 test.beforeAll(async () => {
   await cleanupBrowserProcesses();
   clearAppData();
+
+  checkpointDir = mkdtempSync(resolve(tmpdir(), "babel-checkpoint-e2e-"));
+  writeFileSync(resolve(checkpointDir, "checkpoint-ui-test.json"), JSON.stringify({
+    job_id: "checkpoint-ui-test",
+    source_hash: "fixture-hash",
+    translation_signature: "fixture-signature",
+    source_path: "Dead Mountain checkpoint fixture.epub",
+    chapters: [
+      { index: 0, href: "part0034.xhtml", status: "completed", content: [], error: null },
+      { index: 1, href: "part0035.xhtml", status: "failed", content: null, error: "fixture failure" },
+      { index: 2, href: "part0036.xhtml", status: "pending", content: null, error: null },
+    ],
+  }));
 
   const port = await getFreePort();
   cdpUrl = `http://localhost:${port}`;
@@ -23,6 +39,7 @@ test.beforeAll(async () => {
       ...process.env,
       BABEL_EBOOK_E2E_CDP_PORT: String(port),
       BABEL_EBOOK_E2E_UI_LANGUAGE: "en",
+      BABEL_EBOOK_E2E_CHECKPOINT_DIR: checkpointDir,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -42,6 +59,20 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   await forceKill(appProcess);
+  if (checkpointDir) rmSync(checkpointDir, { recursive: true, force: true });
+});
+
+test("loads persisted checkpoints and allows selecting a resume record", async () => {
+  const browser = await chromium.connectOverCDP(cdpUrl);
+  const page = browser.contexts()[0].pages()[0];
+  await page.getByTestId("nav-translate").click();
+  const checkpoint = page.getByTestId("checkpoint-item-checkpoint-ui-test");
+  await expect(checkpoint).toBeVisible({ timeout: 15000 });
+  await expect(checkpoint).toContainText("Dead Mountain checkpoint fixture.epub");
+  await checkpoint.click();
+  await expect(page.getByTestId("clear-resume-selection")).toBeVisible();
+  await page.getByTestId("clear-resume-selection").click();
+  await browser.close();
 });
 
 test("navigates through all settings tabs and persists changes", async () => {

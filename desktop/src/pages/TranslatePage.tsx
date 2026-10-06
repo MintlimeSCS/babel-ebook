@@ -55,8 +55,8 @@ function TranslatePage({
       }
       try {
         const list = await invoke<CheckpointInfo[]>("list_checkpoints", {
-          checkpoint_dir: inputs.checkpoint_dir,
-          current_source: inputs.source || null,
+          checkpointDir: inputs.checkpoint_dir,
+          currentSource: inputs.source || null,
         });
         if (!cancelled) {
           setCheckpoints(list);
