@@ -5,7 +5,7 @@ use crate::translator::http_common::{
     openai_compatible_health_check, openai_compatible_list_models, openai_compatible_translate,
 };
 use crate::translator::{TranslateContext, Translator};
-use async_openai::config::OpenAIConfig;
+use async_openai::config::{Config as _, OpenAIConfig};
 use async_trait::async_trait;
 
 const DEFAULT_MODEL: &str = "gpt-4o-mini";
@@ -54,6 +54,10 @@ impl Translator for OpenAiTranslator {
         self.max_tokens
     }
 
+    fn cache_identity(&self) -> String {
+        serde_json::json!([self.name(), self.config().api_base(), self.temperature]).to_string()
+    }
+
     async fn health_check(&self) -> Result<(), BabelEbookError> {
         openai_compatible_health_check(self.config(), "OpenAI").await
     }
@@ -90,6 +94,36 @@ impl Translator for OpenAiTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_identity_tracks_model_endpoint_and_temperature_but_not_credentials() {
+        let make = |key: &str, model: &str, endpoint: &str, temperature| {
+            OpenAiTranslator::new(
+                key.into(),
+                Some(model.into()),
+                Some(endpoint.into()),
+                2000,
+                temperature,
+            )
+        };
+        let original = make("first-key", "model-a", "https://example.org/v1", 0.3).cache_identity();
+        assert_eq!(
+            original,
+            make("second-key", "model-a", "https://example.org/v1", 0.3).cache_identity()
+        );
+        assert_ne!(
+            original,
+            make("first-key", "model-b", "https://example.org/v1", 0.3).cache_identity()
+        );
+        assert_ne!(
+            original,
+            make("first-key", "model-a", "https://other.example.org/v1", 0.3).cache_identity()
+        );
+        assert_ne!(
+            original,
+            make("first-key", "model-a", "https://example.org/v1", 0.7).cache_identity()
+        );
+    }
 
     #[test]
     fn new_uses_defaults() {

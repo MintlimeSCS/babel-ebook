@@ -798,7 +798,16 @@ impl TranslationOptions {
         let lines: Vec<String> = self
             .glossary
             .iter()
-            .map(|e| format!("- {} => {}", e.term, e.translation))
+            .filter(|e| !e.term.trim().is_empty() && !e.translation.trim().is_empty())
+            .map(|e| {
+                let mut line = format!("- {} => {}", e.term.trim(), e.translation.trim());
+                if let Some(context) = e.context.as_deref().filter(|s| !s.trim().is_empty()) {
+                    line.push_str(" (context: ");
+                    line.push_str(context.trim());
+                    line.push(')');
+                }
+                line
+            })
             .collect();
         format!("\nUse the following glossary:\n{}\n", lines.join("\n"))
     }
@@ -808,17 +817,12 @@ impl TranslationOptions {
     #[must_use]
     #[allow(clippy::literal_string_with_formatting_args)]
     pub fn system_prompt(&self) -> String {
-        self.system_prompt.clone().unwrap_or_else(|| {
-            let source_lang = if self.source_lang == "auto" {
-                "the original language".to_string()
-            } else {
-                self.source_lang.clone()
-            };
-            self.style_prompt()
-                .replace("{source_lang}", &source_lang)
-                .replace("{target_lang}", &self.target_lang)
-                + &self.glossary_prompt()
-        })
+        self.render_prompt(
+            &self
+                .system_prompt
+                .clone()
+                .unwrap_or_else(|| self.style_prompt()),
+        )
     }
 
     /// Return the system prompt configured for a specific chapter, falling back
@@ -827,8 +831,7 @@ impl TranslationOptions {
     pub fn system_prompt_for_chapter(&self, href: &str) -> String {
         self.chapter_prompts
             .get(href)
-            .cloned()
-            .unwrap_or_else(|| self.system_prompt())
+            .map_or_else(|| self.system_prompt(), |prompt| self.render_prompt(prompt))
     }
 
     /// Return the configured refine prompt localised to the source/target
@@ -836,14 +839,17 @@ impl TranslationOptions {
     #[must_use]
     #[allow(clippy::literal_string_with_formatting_args)]
     pub fn refine_prompt(&self) -> String {
+        self.render_prompt(&self.prompts.refine)
+    }
+
+    #[allow(clippy::literal_string_with_formatting_args)]
+    fn render_prompt(&self, prompt: &str) -> String {
         let source_lang = if self.source_lang == "auto" {
             "the original language".to_string()
         } else {
             self.source_lang.clone()
         };
-        self.prompts
-            .refine
-            .clone()
+        prompt
             .replace("{source_lang}", &source_lang)
             .replace("{target_lang}", &self.target_lang)
             + &self.glossary_prompt()
@@ -867,7 +873,13 @@ impl TranslationOptions {
     /// within the configured limit.
     #[must_use]
     pub fn max_source_tokens(&self) -> usize {
-        let prompt_tokens = crate::chunking::count_tokens(&self.system_prompt()) + 50;
+        self.max_source_tokens_for_prompt(&self.system_prompt())
+    }
+
+    /// Reserve space for the actual chapter prompt, including the glossary.
+    #[must_use]
+    pub fn max_source_tokens_for_prompt(&self, prompt: &str) -> usize {
+        let prompt_tokens = crate::chunking::count_tokens(prompt) + 50;
         let input = self.max_input_tokens.saturating_sub(prompt_tokens);
         let output = self.max_output_tokens.saturating_sub(200);
         input.min(output).max(1)
@@ -935,6 +947,7 @@ fn default_translate_tags() -> Vec<String> {
         "h6".into(),
         "li".into(),
         "figcaption".into(),
+        "caption".into(),
         "dt".into(),
         "dd".into(),
         "td".into(),

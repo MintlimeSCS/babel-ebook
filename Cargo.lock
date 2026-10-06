@@ -322,6 +322,7 @@ dependencies = [
  "kuchiki",
  "markup5ever 0.10.1",
  "mobi",
+ "quick-xml 0.36.2",
  "rbook",
  "regex",
  "reqwest 0.12.28",

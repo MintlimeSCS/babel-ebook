@@ -80,6 +80,12 @@ test("navigates through all settings tabs and persists changes", async () => {
   await expect(maxInputTokens).toBeVisible();
   await maxInputTokens.fill("1234");
   await maxInputTokens.blur();
+  await page.getByTestId("settings-tab-prompts").click();
+  await page.getByTestId("glossary-add").click();
+  await page.getByTestId("glossary-term-0").fill("Mercer");
+  await page.getByTestId("glossary-translation-0").fill("默瑟");
+  await page.getByTestId("glossary-context-0").fill("Character surname");
+  await page.getByTestId("glossary-context-0").blur();
   await page.waitForTimeout(700);
 
   // Reload the webview and verify the persisted value.
@@ -88,6 +94,12 @@ test("navigates through all settings tabs and persists changes", async () => {
   await page.getByTestId("nav-settings").click();
   await page.getByTestId("settings-tab-model").click();
   await expect(maxInputTokens).toHaveValue("1234");
+  await page.getByTestId("settings-tab-prompts").click();
+  await expect(page.getByTestId("glossary-term-0")).toHaveValue("Mercer");
+  await expect(page.getByTestId("glossary-translation-0")).toHaveValue("默瑟");
+  await expect(page.getByTestId("glossary-context-0")).toHaveValue("Character surname");
+  await page.getByTestId("glossary-remove-0").click();
+  await expect(page.getByTestId("glossary-entry")).toHaveCount(0);
 
   // Queue tab: invalid concurrency shows an inline error and clamps on blur.
   await page.getByTestId("settings-tab-queue").click();

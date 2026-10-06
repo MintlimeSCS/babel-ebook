@@ -93,8 +93,8 @@ async fn translate_text_translates_and_caches() {
     .expect("translation should succeed");
     assert_eq!(result, "[ZH] hello world");
 
-    let cached = cache.get("fake", "hello world");
-    assert_eq!(cached, Some("[ZH] hello world".into()));
+    assert!(std::fs::read_dir(_dir.path()).unwrap().count() > 0);
+    assert_eq!(cache.get("fake", "hello world"), None);
 }
 
 #[tokio::test]
@@ -290,7 +290,7 @@ async fn process_document_ignores_skipped_descendants_when_checking_children() {
     let out_str = String::from_utf8(out).expect("valid UTF-8");
 
     assert!(
-        out_str.contains("<div lang=\"zh-CN\">[ZH] code</div>"),
+        out_str.contains("<div lang=\"zh-CN\">[ZH] <pre><p>code</p></pre></div>"),
         "outer div should be translated: {}",
         out_str
     );
@@ -725,8 +725,8 @@ async fn refine_pass_is_cached() {
     .expect("translation should succeed");
     assert_eq!(result, "[ZH] [ZH] hello world");
 
-    let cached = cache.get("fake-refine", "[ZH] hello world");
-    assert_eq!(cached, Some("[ZH] [ZH] hello world".into()));
+    assert!(std::fs::read_dir(_dir.path()).unwrap().count() >= 2);
+    assert_eq!(cache.get("fake-refine", "[ZH] hello world"), None);
 }
 
 #[tokio::test]

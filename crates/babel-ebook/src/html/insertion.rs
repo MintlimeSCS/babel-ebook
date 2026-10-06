@@ -3,7 +3,46 @@
 use kuchiki::{Attribute, ExpandedName, NodeRef};
 use markup5ever::{namespace_url, ns, QualName};
 
-use crate::config::OutputMode;
+use crate::config::{OutputMode, TranslationOptions};
+
+pub fn insert_translation(
+    node: &NodeRef,
+    name: &QualName,
+    translated: &NodeRef,
+    options: &TranslationOptions,
+) {
+    let source = if options.source_lang == "auto" {
+        "en"
+    } else {
+        &options.source_lang
+    };
+    match name.local.as_ref() {
+        "td" | "th" | "caption" | "figcaption" => insert_contained_translation(
+            node,
+            translated,
+            &options.target_lang,
+            source,
+            options.output_mode,
+        ),
+        "li" => insert_li_translation(
+            node,
+            translated,
+            &options.target_lang,
+            source,
+            options.output_mode,
+            options.preserve_classes,
+        ),
+        _ => insert_generic_translation(
+            node,
+            name,
+            translated,
+            &options.target_lang,
+            source,
+            options.output_mode,
+            options.preserve_classes,
+        ),
+    }
+}
 
 /// Set the `lang` attribute on `node` to `value`.
 pub fn set_lang(node: &NodeRef, value: &str) {
@@ -17,7 +56,7 @@ pub fn set_lang(node: &NodeRef, value: &str) {
 pub fn insert_generic_translation(
     node: &NodeRef,
     name: &QualName,
-    translated: &str,
+    translated: &NodeRef,
     target_lang: &str,
     source_lang: &str,
     mode: OutputMode,
@@ -25,9 +64,23 @@ pub fn insert_generic_translation(
 ) {
     let translated_element =
         NodeRef::new_element(QualName::new(None, ns!(html), name.local.clone()), None);
-    translated_element.append(NodeRef::new_text(translated));
-    if preserve_classes {
-        copy_element_attributes(node, &translated_element);
+    append_content(&translated_element, translated);
+    copy_element_attributes(node, &translated_element);
+    if !preserve_classes {
+        translated_element
+            .as_element()
+            .expect("element")
+            .attributes
+            .borrow_mut()
+            .remove("class");
+    }
+    if mode != OutputMode::TranslationOnly {
+        translated_element
+            .as_element()
+            .expect("element")
+            .attributes
+            .borrow_mut()
+            .remove("id");
     }
     set_lang(&translated_element, target_lang);
 
@@ -62,7 +115,7 @@ pub fn insert_generic_translation(
 #[allow(unused_variables)]
 pub fn insert_li_translation(
     node: &NodeRef,
-    translated: &str,
+    translated: &NodeRef,
     target_lang: &str,
     source_lang: &str,
     mode: OutputMode,
@@ -72,7 +125,7 @@ pub fn insert_li_translation(
         OutputMode::Bilingual => {
             let translated_p =
                 NodeRef::new_element(QualName::new(None, ns!(html), "p".into()), None);
-            translated_p.append(NodeRef::new_text(translated));
+            append_content(&translated_p, translated);
             set_lang(&translated_p, target_lang);
             node.prepend(translated_p);
 
@@ -93,14 +146,14 @@ pub fn insert_li_translation(
             while let Some(child) = node.first_child() {
                 child.detach();
             }
-            node.append(NodeRef::new_text(translated));
+            append_content(node, translated);
             set_lang(node, target_lang);
         }
         OutputMode::Interleaved => {
             // Original content first, then the translated paragraph.
             let translated_p =
                 NodeRef::new_element(QualName::new(None, ns!(html), "p".into()), None);
-            translated_p.append(NodeRef::new_text(translated));
+            append_content(&translated_p, translated);
             set_lang(&translated_p, target_lang);
             node.append(translated_p);
             set_lang(node, source_lang);
@@ -123,7 +176,7 @@ fn copy_element_attributes(source: &NodeRef, target: &NodeRef) {
 }
 
 /// Create a deep clone of `node` and its descendants.
-fn clone_subtree(node: &NodeRef) -> NodeRef {
+pub(super) fn clone_subtree(node: &NodeRef) -> NodeRef {
     match node.data() {
         kuchiki::NodeData::Element(data) => {
             let attributes: Vec<(ExpandedName, Attribute)> = data
@@ -166,5 +219,64 @@ fn clone_subtree(node: &NodeRef) -> NodeRef {
             }
             cloned
         }
+    }
+}
+
+fn append_content(target: &NodeRef, content: &NodeRef) {
+    while let Some(child) = content.first_child() {
+        target.append(child);
+    }
+}
+
+/// Keep bilingual text inside the original cell/caption rather than duplicating it.
+pub fn insert_contained_translation(
+    node: &NodeRef,
+    translated: &NodeRef,
+    target_lang: &str,
+    source_lang: &str,
+    mode: OutputMode,
+) {
+    if mode == OutputMode::TranslationOnly {
+        while let Some(child) = node.first_child() {
+            child.detach();
+        }
+        append_content(node, translated);
+        set_lang(node, target_lang);
+        return;
+    }
+    let wrapper = if node
+        .as_element()
+        .is_some_and(|e| e.name.local.as_ref() == "caption")
+    {
+        "span"
+    } else {
+        "div"
+    };
+    let original = NodeRef::new_element(QualName::new(None, ns!(html), wrapper.into()), None);
+    while let Some(child) = node.first_child() {
+        original.append(child);
+    }
+    set_lang(&original, source_lang);
+    let translation = NodeRef::new_element(QualName::new(None, ns!(html), wrapper.into()), None);
+    append_content(&translation, translated);
+    set_lang(&translation, target_lang);
+    if mode == OutputMode::Bilingual {
+        node.append(translation);
+        if wrapper == "span" {
+            node.append(NodeRef::new_element(
+                QualName::new(None, ns!(html), "br".into()),
+                None,
+            ));
+        }
+        node.append(original);
+    } else {
+        node.append(original);
+        if wrapper == "span" {
+            node.append(NodeRef::new_element(
+                QualName::new(None, ns!(html), "br".into()),
+                None,
+            ));
+        }
+        node.append(translation);
     }
 }

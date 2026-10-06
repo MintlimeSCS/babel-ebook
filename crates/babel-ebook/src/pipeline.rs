@@ -67,7 +67,15 @@ pub async fn run_ordered_pipeline(
     }
 
     let job_id = resolve_job_id(checkpoint_store, job_id, context.config);
-    let mut checkpoint = build_checkpoint(book, &indices, checkpoint_store, &job_id, source_hash);
+    let signature = CheckpointStore::translation_signature(context.config);
+    let mut checkpoint = build_checkpoint(
+        book,
+        &indices,
+        checkpoint_store,
+        &job_id,
+        source_hash,
+        &signature,
+    );
     checkpoint.source_path = context.config.source.to_string_lossy().into_owned();
     let completed = restore_completed_chapters(book, &indices, &checkpoint, context.progress);
     let pending_indices: Vec<usize> = indices
@@ -220,19 +228,21 @@ fn build_checkpoint(
     checkpoint_store: Option<&CheckpointStore>,
     job_id: &str,
     source_hash: &str,
+    signature: &str,
 ) -> Checkpoint {
     let loaded = checkpoint_store.and_then(|store| store.load(job_id));
     let mut checkpoint = if let Some(cp) = loaded {
-        if !cp.source_hash.is_empty() && cp.source_hash != source_hash {
+        if cp.source_hash != source_hash || cp.translation_signature != signature {
             tracing::warn!(
                 job_id,
                 stored_hash = %cp.source_hash,
                 current_hash = %source_hash,
-                "source hash mismatch; ignoring existing checkpoint"
+                "source or translation settings changed; ignoring existing checkpoint"
             );
             Checkpoint {
                 job_id: job_id.to_string(),
                 source_hash: source_hash.to_string(),
+                translation_signature: signature.to_string(),
                 source_path: String::new(),
                 chapters: Vec::new(),
             }
@@ -243,6 +253,7 @@ fn build_checkpoint(
         Checkpoint {
             job_id: job_id.to_string(),
             source_hash: source_hash.to_string(),
+            translation_signature: signature.to_string(),
             source_path: String::new(),
             chapters: Vec::new(),
         }
@@ -465,6 +476,7 @@ mod tests {
             .save(&Checkpoint {
                 job_id: job_id.clone(),
                 source_hash: "hash".into(),
+                translation_signature: CheckpointStore::translation_signature(&config),
                 source_path: config.source.to_string_lossy().into_owned(),
                 chapters: vec![
                     ChapterCheckpoint {

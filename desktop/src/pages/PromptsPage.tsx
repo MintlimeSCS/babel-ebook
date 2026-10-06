@@ -81,6 +81,36 @@ function PromptsPage({ promptSettings, setPromptSettings }: PromptsPageProps) {
         />
       </label>
 
+      <section aria-label={t("glossary_title")}>
+        <h3>{t("glossary_title")}</h3>
+        <p className="hint">{t("glossary_help")}</p>
+        {promptSettings.glossary.map((entry, index) => (
+          <div key={index} data-testid="glossary-entry">
+            {(["term", "translation", "context"] as const).map((field) => (
+              <label key={field}>
+                {t(`glossary_${field}`)}
+                <input
+                  data-testid={`glossary-${field}-${index}`}
+                  value={entry[field] ?? ""}
+                  onChange={(event) => setPromptSettings({
+                    glossary: promptSettings.glossary.map((item, i) => i === index
+                      ? { ...item, [field]: event.target.value } : item),
+                  })}
+                />
+              </label>
+            ))}
+            <button type="button" data-testid={`glossary-remove-${index}`}
+              onClick={() => setPromptSettings({ glossary: promptSettings.glossary.filter((_, i) => i !== index) })}>
+              {t("glossary_remove")}
+            </button>
+          </div>
+        ))}
+        <button type="button" data-testid="glossary-add"
+          onClick={() => setPromptSettings({ glossary: [...promptSettings.glossary, { term: "", translation: "", context: "" }] })}>
+          {t("glossary_add")}
+        </button>
+      </section>
+
       {fields.map(({ key, labelKey }) => (
         <label key={key}>
           {t(labelKey)}

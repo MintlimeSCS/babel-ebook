@@ -796,6 +796,7 @@ mod tests {
             job_id: "job-1".to_string(),
             source_hash: "abc123".to_string(),
             source_path: "/input/book.epub".to_string(),
+            translation_signature: String::new(),
             chapters: vec![
                 babel_ebook::checkpoint::ChapterCheckpoint {
                     index: 0,

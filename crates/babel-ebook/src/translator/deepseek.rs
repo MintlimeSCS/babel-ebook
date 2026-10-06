@@ -5,7 +5,7 @@ use crate::translator::http_common::{
     openai_compatible_health_check, openai_compatible_list_models, openai_compatible_translate,
 };
 use crate::translator::{TranslateContext, Translator};
-use async_openai::config::OpenAIConfig;
+use async_openai::config::{Config as _, OpenAIConfig};
 use async_trait::async_trait;
 
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
@@ -54,6 +54,10 @@ impl Translator for DeepSeekTranslator {
 
     fn max_output_tokens(&self) -> usize {
         self.max_tokens
+    }
+
+    fn cache_identity(&self) -> String {
+        serde_json::json!([self.name(), self.config().api_base(), self.temperature]).to_string()
     }
 
     async fn health_check(&self) -> Result<(), BabelEbookError> {

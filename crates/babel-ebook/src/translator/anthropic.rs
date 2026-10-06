@@ -75,6 +75,10 @@ impl Translator for AnthropicTranslator {
         self.max_tokens
     }
 
+    fn cache_identity(&self) -> String {
+        serde_json::json!([self.name(), self.base_url, self.temperature]).to_string()
+    }
+
     async fn health_check(&self) -> Result<(), BabelEbookError> {
         let response = self
             .client

@@ -72,6 +72,12 @@ export interface PromptTemplates {
   refine: string;
 }
 
+export interface GlossaryEntry {
+  term: string;
+  translation: string;
+  context: string | null;
+}
+
 /**
  * Shared form state used across the desktop application.
  *
@@ -83,6 +89,7 @@ export interface FormState {
   source: string;
   output: string;
   system_prompt: string;
+  glossary: GlossaryEntry[];
   prompts: PromptTemplates;
   source_lang: string;
   target_lang: string;
@@ -147,7 +154,7 @@ export type TranslationSettingsState = Pick<
 >;
 
 /** System prompt and per-style prompt templates. */
-export type PromptSettingsState = Pick<FormState, "system_prompt" | "prompts">;
+export type PromptSettingsState = Pick<FormState, "system_prompt" | "prompts" | "glossary">;
 
 /** Output formatting and checkpoint directory settings. */
 export type OutputSettingsState = Pick<
@@ -251,6 +258,7 @@ export const defaults: FormState = {
   source: "",
   output: "",
   system_prompt: "",
+  glossary: [],
   prompts: {
     default: "",
     literary: "",

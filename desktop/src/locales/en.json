@@ -320,5 +320,12 @@
   "ocr_settings_models_hint": "OCR, verify, and refine models are picked on the OCR page (per provider). This tab holds engine tuning only.",
   "ocr_verify_settings_hint": "Model and thresholds used when verification is enabled on the OCR page.",
   "ocr_refine_settings_hint": "Model and rounds used when refinement is enabled on the OCR page.",
-  "ocr_error_no_files": "Select a PDF and an output path"
+  "ocr_error_no_files": "Select a PDF and an output path",
+  "glossary_title": "Glossary",
+  "glossary_help": "Use entries for the current book. They apply to custom prompts and refinement too. Edit or remove them when changing books. Incomplete rows are ignored.",
+  "glossary_term": "Original term",
+  "glossary_translation": "Preferred translation",
+  "glossary_context": "Context (optional)",
+  "glossary_add": "Add term",
+  "glossary_remove": "Remove term"
 }

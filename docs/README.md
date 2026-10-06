@@ -1,5 +1,19 @@
 # 巴别塔 · BabelEbook
 
+> GPT-5 compatibility patch: GPT-5 requests now send `max_completion_tokens`.
+> The temperature setting is omitted for these models. The Windows installer
+> can be built from Actions → Build Windows installer → Run workflow.
+> 繁體中文修正：後端現在接受翻譯頁面提供的 `zh-TW` 語言選項。
+
+> 整合修正：快取會區分語言、模型、API 端點、有效提示詞、詞彙表與請求參數；
+> 舊快取及設定不符的續譯章節不會被沿用，無須手動刪除。
+> 在「設定 → 提示詞 → 詞彙表」填入目前書籍的術語、指定譯名與選填語境；
+> 自訂提示詞、章節提示詞與潤稿都會套用。詞彙表會隨設定保存、匯出及匯入，
+> 換書時請更新或清空。未填完整的項目不會送出。
+> EPUB 章節以 XHTML 輸出，保留斜體、連結與換行；雙語表格保留原欄數，
+> 表格標題會翻譯，純數字儲存格保持原樣。模型若改動格式保護標記，該章節會
+> 回報錯誤而非保存損壞內容；可從續譯記錄重試失敗章節。
+
 [![CI][ci-badge]][ci-url]
 [![License: MIT][license-badge]][license-url]
 [![Rust Version][rust-badge]][rust-url]

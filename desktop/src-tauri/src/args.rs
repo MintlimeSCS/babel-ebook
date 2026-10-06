@@ -63,6 +63,9 @@ pub struct TranslateArgs {
     /// Optional custom system prompt override. When provided, it replaces the
     /// style-based prompt entirely.
     pub system_prompt: Option<String>,
+    /// Explicit glossary supplied by the user, empty in older saved tasks.
+    #[serde(default)]
+    pub glossary: Vec<babel_ebook::config::GlossaryEntry>,
     /// Configurable prompt templates for each translation style.
     pub prompts: PromptTemplates,
     /// If true, run a second refinement pass over the first-pass translation.

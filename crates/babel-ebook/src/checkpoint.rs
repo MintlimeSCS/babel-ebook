@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::OutputMode;
+use crate::config::{Config, OutputMode};
 use crate::core::BabelEbookError;
 
 /// Lifecycle status of a single chapter within a checkpoint.
@@ -42,6 +42,9 @@ pub struct Checkpoint {
     pub job_id: String,
     /// Hash of the source file used to detect changes.
     pub source_hash: String,
+    /// Versioned translation settings signature; legacy checkpoints are retranslated.
+    #[serde(default)]
+    pub translation_signature: String,
     /// Original path to the source file.
     #[serde(default)]
     pub source_path: String,
@@ -57,6 +60,47 @@ pub struct CheckpointStore {
 }
 
 impl CheckpointStore {
+    /// Hash only output-affecting settings, never credentials or destination paths.
+    #[must_use]
+    pub fn translation_signature(config: &Config) -> String {
+        let chapters: std::collections::BTreeMap<_, _> = config
+            .chapter_prompts
+            .keys()
+            .map(|href| (href, config.system_prompt_for_chapter(href)))
+            .collect();
+        let provider = config.provider_config.as_ref();
+        let settings = serde_json::json!([
+            "epub-translation-v2",
+            config.source_lang,
+            config.target_lang,
+            config.provider,
+            config.model,
+            config.base_url,
+            provider.map(|p| (
+                &p.name,
+                &p.default_model,
+                &p.base_url,
+                p.max_tokens,
+                p.temperature
+            )),
+            config.max_input_tokens,
+            config.max_output_tokens,
+            config.temperature,
+            config.output_mode,
+            config.translation_scope,
+            config.system_prompt(),
+            chapters,
+            config.refine,
+            config.refine_prompt(),
+            config.exclude_selectors,
+            config.translate_tags,
+            config.translate_attributes,
+            config.preserve_classes,
+            config.output_font,
+            config.skip_doc_patterns
+        ]);
+        hex::encode(Sha256::digest(settings.to_string().as_bytes()))
+    }
     /// Create the store, ensuring the directory exists.
     ///
     /// # Errors
@@ -202,6 +246,7 @@ mod tests {
         let cp = Checkpoint {
             job_id: "job-1".into(),
             source_hash: "hash".into(),
+            translation_signature: "settings".into(),
             source_path: "input/book.epub".into(),
             chapters: vec![
                 ChapterCheckpoint {

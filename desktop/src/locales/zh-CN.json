@@ -320,5 +320,12 @@
   "ocr_settings_models_hint": "OCR、校验、精炼的模型在 OCR 页按 provider 选择；此页仅设置引擎调参。",
   "ocr_verify_settings_hint": "在 OCR 页启用校验时使用的模型与阈值。",
   "ocr_refine_settings_hint": "在 OCR 页启用精炼时使用的模型与轮数。",
-  "ocr_error_no_files": "请选择 PDF 和输出路径"
+  "ocr_error_no_files": "请选择 PDF 和输出路径",
+  "glossary_title": "詞彙表",
+  "glossary_help": "填寫目前書籍的譯名與術語；自訂提示詞和潤稿也會套用。換書時請更新或刪除。未填完整的項目不會送出。",
+  "glossary_term": "原文詞彙",
+  "glossary_translation": "指定譯名",
+  "glossary_context": "適用語境（選填）",
+  "glossary_add": "新增詞彙",
+  "glossary_remove": "刪除此項"
 }

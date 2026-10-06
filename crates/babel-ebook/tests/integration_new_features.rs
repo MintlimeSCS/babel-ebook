@@ -700,7 +700,7 @@ async fn resume_treats_corrupted_checkpoint_as_fresh() {
 }
 
 #[tokio::test]
-async fn resume_with_refine_skips_already_completed_chapters() {
+async fn enabling_refine_invalidates_completed_chapters() {
     let temp_dir = TempDir::new().expect("create temp dir");
     let checkpoint_dir = temp_dir.path().join("checkpoints");
     let cache_dir = temp_dir.path().join("cache");
@@ -734,13 +734,81 @@ async fn resume_with_refine_skips_already_completed_chapters() {
 
     let content = read_chapter_content(&output2, "ch01");
     assert!(
-        content.contains("<p lang=\"zh-CN\">[ZH] Hello world</p>"),
-        "completed chapter should be restored without a second refine pass: {}",
+        content.contains("<p lang=\"zh-CN\">[ZH] [ZH] Hello world</p>"),
+        "changed refinement setting must produce a refined chapter: {}",
         content
     );
-    assert!(
-        !content.contains("[ZH] [ZH]"),
-        "refine pass should not re-run an already completed chapter: {}",
-        content
+}
+
+#[tokio::test]
+async fn resume_retranslates_after_prompt_or_glossary_changes_and_ignores_legacy_content() {
+    struct PromptRecorder(Mutex<Vec<String>>);
+    #[async_trait]
+    impl Translator for PromptRecorder {
+        fn name(&self) -> String {
+            "prompt-recorder".into()
+        }
+        fn max_output_tokens(&self) -> usize {
+            2000
+        }
+        async fn translate(
+            &self,
+            text: &str,
+            context: &TranslateContext<'_>,
+        ) -> Result<String, babel_ebook::BabelEbookError> {
+            self.0.lock().unwrap().push(context.system_prompt.into());
+            Ok(format!("[ZH] {text}"))
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let source = create_epub(
+        dir.path(),
+        &[("ch01.xhtml".into(), None, "<p>Hello world</p>".into())],
     );
+    let output = dir.path().join("output.epub");
+    let mut config = test_config(
+        source,
+        output.clone(),
+        dir.path().join("cache"),
+        dir.path().join("checkpoints"),
+    );
+    config.translation_scope.toc = false;
+    let translator = PromptRecorder(Mutex::new(Vec::new()));
+    translate_epub(&config, &translator, None, None)
+        .await
+        .unwrap();
+    translate_epub(&config, &translator, None, None)
+        .await
+        .unwrap();
+    assert_eq!(translator.0.lock().unwrap().len(), 1);
+    config.system_prompt = Some("Updated instruction".into());
+    translate_epub(&config, &translator, None, None)
+        .await
+        .unwrap();
+    assert_eq!(translator.0.lock().unwrap().len(), 2);
+    config.glossary.push(babel_ebook::GlossaryEntry {
+        term: "world".into(),
+        translation: "世界".into(),
+        context: None,
+    });
+    translate_epub(&config, &translator, None, None)
+        .await
+        .unwrap();
+    assert_eq!(translator.0.lock().unwrap().len(), 3);
+    assert!(translator.0.lock().unwrap()[2].contains("world => 世界"));
+    let job_id = find_job_id(&config.checkpoint_dir);
+    let store = CheckpointStore::new(config.checkpoint_dir.clone()).unwrap();
+    let mut legacy = store.load(&job_id).unwrap();
+    legacy.translation_signature.clear();
+    legacy.chapters[0].content = Some(b"<p>LEGACY INVALID CONTENT</p>".to_vec());
+    store.save(&legacy).unwrap();
+    translate_epub(&config, &translator, None, None)
+        .await
+        .unwrap();
+    assert!(!read_chapter_content(&output, "ch01").contains("LEGACY INVALID CONTENT"));
+    assert!(!store
+        .load(&job_id)
+        .unwrap()
+        .translation_signature
+        .is_empty());
 }

@@ -947,6 +947,7 @@ mod tests {
             translate_code: false,
             output_font: None,
             system_prompt: None,
+            glossary: Vec::new(),
             prompts: PromptTemplates::default(),
             refine: false,
             checkpoint_dir: ".babel_ebook_checkpoints".to_string(),

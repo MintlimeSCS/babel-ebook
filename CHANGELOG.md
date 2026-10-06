@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — consolidated translation repair
+
+- GPT-5 Chat Completions requests use `max_completion_tokens` and omit sampling
+  temperature. Other model families retain their existing parameter handling.
+- Add a manually triggered Windows installer build with core tests.
+- Accept Traditional Chinese (`zh-TW`) as a source or target language, matching
+  the desktop language picker.
+- Scope translation/refinement caches to language, effective prompts, glossary,
+  provider/model/endpoint and request parameters; ignore unscoped legacy entries.
+- Reprocess saved chapters when translation settings or the source change.
+- Add editable glossary entries to desktop prompt settings, persist/import/export
+  them, and apply glossary context to custom, chapter and refinement prompts.
+- Serialize EPUB chapters as XHTML; preserve inline emphasis, links, protected
+  code/images and line breaks, and reject altered formatting markers.
+- Keep bilingual table text in its original cells, translate table captions,
+  avoid duplicate IDs and leave numeric-only cells unchanged.
+
 ## [0.5.0] - 2026-07-20
 
 - Release version 0.5.0.

@@ -16,7 +16,7 @@ pub const SKIPPED_ANCESTORS: &[&str] = &["pre", "code", "script", "style"];
 /// Mirrors the element-text threshold: trimmed text must contain at least 2
 /// characters.
 pub fn is_translatable_text(text: &str) -> bool {
-    text.trim().chars().count() >= 2
+    text.trim().chars().count() >= 2 && text.chars().any(char::is_alphabetic)
 }
 
 /// Build a set of raw node pointers for elements matched by
@@ -83,7 +83,7 @@ fn is_body_tag(name: &str) -> bool {
 /// Return `true` if `name` is a table cell tag whose text is controlled by
 /// `translation_scope.tables`.
 fn is_table_tag(name: &str) -> bool {
-    matches!(name, "td" | "th")
+    matches!(name, "td" | "th" | "caption")
 }
 
 /// Return `true` if the text content of an element named `name` should be

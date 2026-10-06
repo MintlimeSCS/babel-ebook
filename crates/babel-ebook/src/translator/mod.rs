@@ -25,6 +25,11 @@ pub trait Translator: Send + Sync {
     /// Provider short name, used for cache keys.
     fn name(&self) -> String;
 
+    /// Stable provider/model/endpoint identity for caching; excludes credentials.
+    fn cache_identity(&self) -> String {
+        self.name()
+    }
+
     /// Maximum number of tokens to request in a single completion.
     fn max_output_tokens(&self) -> usize;
 

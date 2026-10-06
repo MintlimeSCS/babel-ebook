@@ -121,6 +121,7 @@ function buildTranslateArgs(form: FormState): object {
     base_url: provider.use_custom_base_url ? provider.base_url || null : null,
     system_prompt: form.system_prompt || null,
     prompts: form.prompts,
+    glossary: form.glossary.filter((entry) => entry.term.trim() && entry.translation.trim()),
     output_font: form.output_font || null,
     exclude_selectors: parseCommaList(form.exclude_selectors),
     translate_attributes: parseCommaList(form.translate_attributes),
@@ -257,8 +258,8 @@ function App() {
   );
 
   const promptSettings: PromptSettingsState = useMemo(
-    () => ({ system_prompt: form.system_prompt, prompts: form.prompts }),
-    [form.system_prompt, form.prompts]
+    () => ({ system_prompt: form.system_prompt, prompts: form.prompts, glossary: form.glossary }),
+    [form.system_prompt, form.prompts, form.glossary]
   );
 
   const outputSettings: OutputSettingsState = useMemo(

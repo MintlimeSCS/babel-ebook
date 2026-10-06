@@ -53,6 +53,7 @@ fn load_minimal_config_uses_defaults() -> Result<()> {
             "h6",
             "li",
             "figcaption",
+            "caption",
             "dt",
             "dd",
             "td",
@@ -218,7 +219,7 @@ fn system_prompt_includes_glossary_entries() -> Result<()> {
 }
 
 #[test]
-fn chapter_system_prompt_overrides_style_and_glossary() -> Result<()> {
+fn chapter_system_prompt_overrides_style_and_retains_glossary() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = write_config(
         &dir,
@@ -237,8 +238,9 @@ fn chapter_system_prompt_overrides_style_and_glossary() -> Result<()> {
     let config = Config::load(&path).context("failed to load config")?;
     let prompt = config.system_prompt_for_chapter("chapter.xhtml");
 
-    assert_eq!(prompt, "Chapter-specific prompt.");
+    assert!(prompt.starts_with("Chapter-specific prompt."));
+    assert!(prompt.contains("AI => 人工智能"));
     assert!(!prompt.contains("technical translator"));
-    assert!(!prompt.contains("Use the following glossary"));
+    assert!(prompt.contains("Use the following glossary"));
     Ok(())
 }

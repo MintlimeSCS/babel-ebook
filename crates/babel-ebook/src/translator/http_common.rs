@@ -126,7 +126,8 @@ pub async fn openai_compatible_translate(
     temperature: f32,
     provider_name: &str,
 ) -> Result<String, BabelEbookError> {
-    let request = build_chat_completion_request(model, system_prompt, text, max_tokens, temperature);
+    let request =
+        build_chat_completion_request(model, system_prompt, text, max_tokens, temperature);
     let is_gpt5 = request.get("max_completion_tokens").is_some();
     let http_client = build_reqwest_client();
 

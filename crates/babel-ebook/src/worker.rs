@@ -571,18 +571,16 @@ mod tests {
         assert!(output.exists(), "output should be written");
 
         // The cache should contain entries for both translated paragraphs.
-        let cached = cache.get("dummy", "Repeat");
-        assert_eq!(
-            cached,
-            Some("[Repeat]".to_string()),
-            "cache should store the first paragraph translation"
-        );
-        let cached = cache.get("dummy", "Again");
-        assert_eq!(
-            cached,
-            Some("[Again]".to_string()),
-            "cache should store the second paragraph translation"
-        );
+        let cached: Vec<serde_json::Value> = std::fs::read_dir(dir.path().join("cache"))
+            .unwrap()
+            .map(|entry| {
+                serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap()
+            })
+            .collect();
+        assert!(cached
+            .iter()
+            .any(|entry| entry["translation"] == "[Repeat]"));
+        assert!(cached.iter().any(|entry| entry["translation"] == "[Again]"));
 
         worker.shutdown();
     }

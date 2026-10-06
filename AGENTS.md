@@ -139,6 +139,13 @@ pnpm tauri dev
 
 ## E2E Testing
 
+The manual `windows-manual.yml` installer build runs all core tests and the
+desktop configuration tests before building the NSIS installer. The artifact
+is named `BabelEbook-Windows-Consolidated-Fix`; this workflow has a 90-minute
+timeout to allow both debug tests and the release build. Settings UI regressions
+are covered by `desktop/e2e/settings-navigation.spec.ts` (run against the Windows
+release binary).
+
 The Playwright suite launches the release binary and connects over WebView2 CDP.
 
 ```bash

@@ -87,6 +87,7 @@ pub fn build_config(args: &TranslateArgs) -> Result<Config, String> {
     }
     config.resume_job_id.clone_from(&args.resume);
     config.system_prompt = args.system_prompt.clone().filter(|s| !s.is_empty());
+    config.glossary = args.glossary.clone();
     if !args.prompts.default.is_empty() {
         config.prompts.default.clone_from(&args.prompts.default);
     }
@@ -163,6 +164,7 @@ mod tests {
             translate_code: false,
             output_font: None,
             system_prompt: None,
+            glossary: Vec::new(),
             prompts: PromptTemplates::default(),
             refine: false,
             checkpoint_dir: ".babel_ebook_checkpoints".to_string(),
@@ -179,6 +181,32 @@ mod tests {
             config.system_prompt,
             Some("custom system prompt".to_string())
         );
+    }
+
+    #[test]
+    fn older_saved_tasks_without_glossary_remain_readable() {
+        let mut value = serde_json::to_value(sample_translate_args()).unwrap();
+        value.as_object_mut().unwrap().remove("glossary");
+        let args: TranslateArgs = serde_json::from_value(value).unwrap();
+        assert!(args.glossary.is_empty());
+    }
+
+    #[test]
+    fn build_config_propagates_glossary_to_custom_prompt() {
+        let mut args = sample_translate_args();
+        args.system_prompt = Some("Translate to {target_lang}".into());
+        args.target_lang = "zh-TW".into();
+        args.glossary.push(babel_ebook::config::GlossaryEntry {
+            term: "Mercer".into(),
+            translation: "默瑟".into(),
+            context: Some("surname".into()),
+        });
+        let config = build_config(&args).unwrap();
+        assert_eq!(config.glossary, args.glossary);
+        assert!(config
+            .system_prompt()
+            .contains("Mercer => 默瑟 (context: surname)"));
+        assert!(config.system_prompt().contains("zh-TW"));
     }
 
     #[test]

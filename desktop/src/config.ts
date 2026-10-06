@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { documentDir, join } from "@tauri-apps/api/path";
 import { readTextFile, writeTextFile, mkdir, exists } from "@tauri-apps/plugin-fs";
-import type { FormState, ProviderConfig, ThemeId } from "./types";
+import type { FormState, GlossaryEntry, ProviderConfig, ThemeId } from "./types";
 import { themes } from "./types";
 
 declare const __APP_VERSION__: string;
@@ -75,6 +75,7 @@ const TRANSLATION_KEYS: Array<keyof FormState> = [
   "output_mode",
   "style",
   "system_prompt",
+  "glossary",
   "prompts",
   "exclude_selectors",
   "translate_attributes",
@@ -250,6 +251,13 @@ function normalizeProvider(p: unknown): ProviderConfig {
   };
 }
 
+function normalizeGlossary(entries: unknown): GlossaryEntry[] {
+  if (!Array.isArray(entries)) return [];
+  return entries.filter((entry) => entry && typeof entry.term === "string" && typeof entry.translation === "string")
+    .map((entry) => ({ term: entry.term, translation: entry.translation,
+      context: typeof entry.context === "string" ? entry.context : null }));
+}
+
 function normalizeProviders(providers: unknown): ProviderConfig[] {
   if (!Array.isArray(providers)) return [];
   return providers.map(normalizeProvider);
@@ -274,6 +282,7 @@ export async function loadSettings(): Promise<Partial<FormState>> {
       translation.resume = "";
     }
     translation.providers = normalizeProviders(translation.providers);
+    translation.glossary = normalizeGlossary(translation.glossary);
 
     // One-time migration: any plaintext API keys left in settings.json are moved
     // to the OS keyring and then cleared from the persisted file. If the keyring
@@ -318,6 +327,7 @@ export async function loadSettings(): Promise<Partial<FormState>> {
     migrated.resume = "";
   }
   migrated.providers = normalizeProviders(migrated.providers);
+  migrated.glossary = normalizeGlossary(migrated.glossary);
   migrated.providers = await Promise.all(
     migrated.providers.map(async (p) => ({
       ...p,
@@ -460,6 +470,7 @@ export async function importSettings(path: string): Promise<ExportedSettings> {
     throw new Error(`version_mismatch:${payload.version}:${SETTINGS_VERSION}`);
   }
 
+  payload.translation.glossary = normalizeGlossary(payload.translation.glossary);
   return payload;
 }
 

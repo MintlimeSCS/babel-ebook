@@ -12,7 +12,8 @@ use crate::config::TranslationOptions;
 use crate::core::{BabelEbookError, CancellationToken, ProgressCallback};
 use crate::translator::Translator;
 
-use insertion::{insert_generic_translation, insert_li_translation};
+use insertion::insert_translation;
+use markup::{ProtectedContent, MARKUP_PROMPT};
 use progress::ChapterChunkAdapter;
 use selection::{
     build_skip_set, has_translatable_child, is_inside_excluded_subtree, is_inside_skipped_parent,
@@ -21,9 +22,11 @@ use selection::{
 };
 
 mod insertion;
+mod markup;
 mod progress;
 mod selection;
 mod translation;
+mod xhtml;
 
 pub use translation::translate_text;
 
@@ -54,7 +57,7 @@ pub async fn process_document(
 
     let translate_tags: HashSet<&str> = options.translate_tags.iter().map(String::as_str).collect();
     if translate_tags.is_empty() {
-        return Ok(doc.to_string().into_bytes());
+        return Ok(xhtml::serialize(&doc));
     }
 
     // Set of raw node pointers used only for identity comparison during this
@@ -67,13 +70,14 @@ pub async fn process_document(
     let selector = options.translate_tags.join(", ");
     let elements: Vec<kuchiki::NodeDataRef<kuchiki::ElementData>> = match doc.select(&selector) {
         Ok(iter) => iter.collect(),
-        Err(()) => return Ok(doc.to_string().into_bytes()),
+        Err(()) => return Ok(xhtml::serialize(&doc)),
     };
 
     // Use a chapter-global chunk counter so that progress does not reset between
     // elements. The total is the number of first-pass source chunks across all
     // translatable text blocks in this chapter.
-    let total_chunks = count_translatable_chunks(&elements, &skip_set, &translate_tags, options);
+    let total_chunks =
+        count_translatable_chunks(&elements, &skip_set, &translate_tags, options, chapter_href)?;
     let adapter = progress.map(|p| {
         ChapterChunkAdapter::new(
             Some(p),
@@ -118,7 +122,7 @@ pub async fn process_document(
         .await?;
     }
 
-    Ok(doc.to_string().into_bytes())
+    Ok(xhtml::serialize(&doc))
 }
 
 /// Count how many first-pass source chunks a chapter will produce.
@@ -130,8 +134,10 @@ fn count_translatable_chunks(
     skip_set: &HashSet<*const kuchiki::Node>,
     translate_tags: &HashSet<&str>,
     options: &TranslationOptions,
-) -> usize {
-    let max_source = options.max_source_tokens();
+    chapter_href: &str,
+) -> Result<usize, BabelEbookError> {
+    let max_source =
+        options.max_source_tokens_for_prompt(&options.system_prompt_for_chapter(chapter_href));
     let mut total = 0usize;
     for element in elements {
         let node = element.as_node();
@@ -149,7 +155,19 @@ fn count_translatable_chunks(
         if should_translate_element_text(tag_name, &options.translation_scope) {
             let text = normalize_text(node);
             if is_translatable_text(&text) {
-                total += split_text_chunks(&text, max_source).len();
+                let content = ProtectedContent::from_node(node, options)?;
+                let settings = protected_options(&content, options, chapter_href);
+                let prompt = settings.system_prompt_for_chapter(chapter_href);
+                let text = if content.has_markup() {
+                    content.text.trim()
+                } else {
+                    &text
+                };
+                total += translation::split_preserving_markers(
+                    text,
+                    settings.max_source_tokens_for_prompt(&prompt),
+                )
+                .len();
             }
         }
 
@@ -164,7 +182,7 @@ fn count_translatable_chunks(
             }
         }
     }
-    total
+    Ok(total)
 }
 
 /// Translate the text and configured attributes of a single element.
@@ -182,56 +200,6 @@ async fn translate_element_text_and_attributes(
 ) -> Result<(), BabelEbookError> {
     let node = element.as_node();
     let tag_name = element.name.local.as_ref();
-
-    if should_translate_element_text(tag_name, &options.translation_scope) {
-        let text = normalize_text(node);
-        if is_translatable_text(&text) {
-            let translated = translate_text(
-                &text,
-                translator,
-                options,
-                cache,
-                chapter_index,
-                chapter_href,
-                progress,
-                cancellation,
-            )
-            .await
-            .map_err(|err| {
-                tracing::error!("Failed to translate element <{}>: {err}", tag_name);
-                err
-            })?;
-
-            if !translated.is_empty() {
-                let target_lang = &options.target_lang;
-                let source_lang = if options.source_lang == "auto" {
-                    "en"
-                } else {
-                    options.source_lang.as_str()
-                };
-                if tag_name == "li" {
-                    insert_li_translation(
-                        node,
-                        &translated,
-                        target_lang,
-                        source_lang,
-                        options.output_mode,
-                        options.preserve_classes,
-                    );
-                } else {
-                    insert_generic_translation(
-                        node,
-                        &element.name,
-                        &translated,
-                        target_lang,
-                        source_lang,
-                        options.output_mode,
-                        options.preserve_classes,
-                    );
-                }
-            }
-        }
-    }
 
     for attr in &options.translate_attributes {
         let attr_name = attr.as_str();
@@ -268,7 +236,58 @@ async fn translate_element_text_and_attributes(
         }
     }
 
+    if should_translate_element_text(tag_name, &options.translation_scope) {
+        let text = normalize_text(node);
+        if is_translatable_text(&text) {
+            let protected = ProtectedContent::from_node(node, options)?;
+            let markup_options = protected_options(&protected, options, chapter_href);
+            let translated = translate_text(
+                if protected.has_markup() {
+                    protected.text.trim()
+                } else {
+                    &text
+                },
+                translator,
+                &markup_options,
+                cache,
+                chapter_index,
+                chapter_href,
+                progress,
+                cancellation,
+            )
+            .await
+            .map_err(|err| {
+                tracing::error!("Failed to translate element <{}>: {err}", tag_name);
+                err
+            })?;
+
+            if !translated.is_empty() {
+                let translated = protected.restore(&translated, options.output_mode)?;
+                insert_translation(node, &element.name, &translated, options);
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn protected_options(
+    content: &ProtectedContent,
+    options: &TranslationOptions,
+    href: &str,
+) -> TranslationOptions {
+    let mut result = options.clone();
+    if content.has_markup() {
+        result.system_prompt = Some(format!(
+            "{}{MARKUP_PROMPT}",
+            options.system_prompt_for_chapter(href)
+        ));
+        // Effective prompts above already contain the glossary.
+        result.chapter_prompts.clear();
+        result.glossary.clear();
+        result.prompts.refine = format!("{}{MARKUP_PROMPT}", options.refine_prompt());
+    }
+    result
 }
 
 /// Inject a `<style>` element setting `font-family` on `<body>` into the document
