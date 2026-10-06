@@ -431,7 +431,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "openai",
     "openai-compatible",
 ];
-const SUPPORTED_LOCALES: &[&str] = &["en", "es", "ja", "ko", "ru", "zh-CN"];
+const SUPPORTED_LOCALES: &[&str] = &["en", "es", "ja", "ko", "ru", "zh-CN", "zh-TW"];
 
 fn validate_non_empty_str(value: &str, name: &str) -> Result<(), BabelEbookError> {
     if value.trim().is_empty() {
