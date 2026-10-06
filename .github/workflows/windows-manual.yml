@@ -9,7 +9,7 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -27,17 +27,22 @@ jobs:
           cache: pnpm
           cache-dependency-path: desktop/pnpm-lock.yaml
       - name: Test translation core
-        run: cargo test --locked -p babel-ebook --lib
+        run: cargo test --locked -p babel-ebook
       - name: Install desktop dependencies
         working-directory: desktop
         run: pnpm install --frozen-lockfile
+      - name: Build desktop frontend
+        working-directory: desktop
+        run: pnpm build
+      - name: Test desktop configuration
+        run: cargo test --locked -p babel-ebook-desktop --lib config::tests
       - name: Build Windows installer
         working-directory: desktop
         run: pnpm tauri build --bundles nsis
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: BabelEbook-Windows-GPT5-Fix
+          name: BabelEbook-Windows-Format-Rate-Fix
           path: target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
           retention-days: 14
