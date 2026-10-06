@@ -40,19 +40,27 @@ function TranslatePage({
 }: TranslatePageProps) {
   const { t } = useTranslation();
   const [checkpoints, setCheckpoints] = useState<CheckpointInfo[]>([]);
+  const [checkpointsLoading, setCheckpointsLoading] = useState(false);
+  const [checkpointLoadFailed, setCheckpointLoadFailed] = useState(false);
   const [pdfConverting, setPdfConverting] = useState(false);
 
   const hasProviders = inputs.providers.length > 0;
   const activeProvider = inputs.providers.find((p) => p.name === inputs.active_provider);
   const selectedCheckpoint = checkpoints.find((cp) => cp.job_id === inputs.resume);
+  const matchingCheckpoints = inputs.source
+    ? checkpoints.filter((cp) => cp.matches_current_source)
+    : [];
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      if (!inputs.checkpoint_dir) {
-        setCheckpoints([]);
+      setCheckpoints([]);
+      setCheckpointLoadFailed(false);
+      if (!inputs.checkpoint_dir || !inputs.source) {
+        setCheckpointsLoading(false);
         return;
       }
+      setCheckpointsLoading(true);
       try {
         const list = await invoke<CheckpointInfo[]>("list_checkpoints", {
           checkpointDir: inputs.checkpoint_dir,
@@ -64,7 +72,10 @@ function TranslatePage({
       } catch {
         if (!cancelled) {
           setCheckpoints([]);
+          setCheckpointLoadFailed(true);
         }
+      } finally {
+        if (!cancelled) setCheckpointsLoading(false);
       }
     }
     void load();
@@ -72,7 +83,7 @@ function TranslatePage({
       cancelled = true;
     };
     // Reload when a translation run finishes so newly created checkpoints appear.
-  }, [inputs.checkpoint_dir, inputs.source, inputs.resume]);
+  }, [inputs.checkpoint_dir, inputs.source, currentTask?.status]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -380,7 +391,9 @@ function TranslatePage({
         </div>
 
         <div className="checkpoint-section">
-          {!inputs.checkpoint_dir ? (
+          {!inputs.source ? (
+            <p className="checkpoint-empty">{t("checkpoint_choose_source")}</p>
+          ) : !inputs.checkpoint_dir ? (
             <div className="checkpoint-setup-prompt">
               <p>{t("checkpoint_setup_prompt")}</p>
               <button
@@ -393,12 +406,16 @@ function TranslatePage({
             </div>
           ) : (
             <div className="checkpoint-list" data-testid="checkpoint-list">
-              {checkpoints.length === 0 ? (
-                <p className="checkpoint-empty">{t("no_checkpoints")}</p>
+              {checkpointsLoading ? (
+                <p className="checkpoint-empty">{t("checkpoint_loading")}</p>
+              ) : checkpointLoadFailed ? (
+                <p className="checkpoint-empty" role="alert">{t("checkpoint_load_failed")}</p>
+              ) : matchingCheckpoints.length === 0 ? (
+                <p className="checkpoint-empty">{t("checkpoint_no_match")}</p>
               ) : (
                 <>
                   <p className="checkpoint-hint">{t("checkpoint_hint")}</p>
-                  {checkpoints.map((cp) => (
+                  {matchingCheckpoints.map((cp) => (
                     <div
                       key={cp.job_id}
                       className={`checkpoint-item ${inputs.resume === cp.job_id ? "selected" : ""} ${

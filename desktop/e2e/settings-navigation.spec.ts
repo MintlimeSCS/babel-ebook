@@ -9,26 +9,39 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 
 let appProcess: ChildProcess | null = null;
 let cdpUrl: string;
 let checkpointDir: string;
+let sourcePath: string;
 
 test.beforeAll(async () => {
   await cleanupBrowserProcesses();
   clearAppData();
 
   checkpointDir = mkdtempSync(resolve(tmpdir(), "babel-checkpoint-e2e-"));
+  sourcePath = resolve(checkpointDir, "Dead Mountain checkpoint fixture.epub");
+  const sourceContent = "checkpoint source fixture";
+  writeFileSync(sourcePath, sourceContent);
+  const sourceHash = createHash("sha256").update(sourceContent).digest("hex");
   writeFileSync(resolve(checkpointDir, "checkpoint-ui-test.json"), JSON.stringify({
     job_id: "checkpoint-ui-test",
-    source_hash: "fixture-hash",
+    source_hash: sourceHash,
     translation_signature: "fixture-signature",
-    source_path: "Dead Mountain checkpoint fixture.epub",
+    source_path: sourcePath,
     chapters: [
       { index: 0, href: "part0034.xhtml", status: "completed", content: [], error: null },
       { index: 1, href: "part0035.xhtml", status: "failed", content: null, error: "fixture failure" },
       { index: 2, href: "part0036.xhtml", status: "pending", content: null, error: null },
     ],
+  }));
+  // A same-named book with different bytes must remain hidden.
+  writeFileSync(resolve(checkpointDir, "checkpoint-other-book.json"), JSON.stringify({
+    job_id: "checkpoint-other-book",
+    source_hash: "different-book-hash",
+    source_path: sourcePath,
+    chapters: [],
   }));
 
   const port = await getFreePort();
@@ -40,6 +53,7 @@ test.beforeAll(async () => {
       BABEL_EBOOK_E2E_CDP_PORT: String(port),
       BABEL_EBOOK_E2E_UI_LANGUAGE: "en",
       BABEL_EBOOK_E2E_CHECKPOINT_DIR: checkpointDir,
+      BABEL_EBOOK_E2E_SOURCE: sourcePath,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -69,9 +83,13 @@ test("loads persisted checkpoints and allows selecting a resume record", async (
   const checkpoint = page.getByTestId("checkpoint-item-checkpoint-ui-test");
   await expect(checkpoint).toBeVisible({ timeout: 15000 });
   await expect(checkpoint).toContainText("Dead Mountain checkpoint fixture.epub");
+  await expect(page.getByTestId("checkpoint-item-checkpoint-other-book")).toHaveCount(0);
   await checkpoint.click();
   await expect(page.getByTestId("clear-resume-selection")).toBeVisible();
   await page.getByTestId("clear-resume-selection").click();
+  await page.locator(".file-row-source .icon-button").click();
+  await expect(page.getByText("Select a source EPUB to see matching resume records.")).toBeVisible();
+  await expect(page.locator(".checkpoint-item")).toHaveCount(0);
   await browser.close();
 });
 
