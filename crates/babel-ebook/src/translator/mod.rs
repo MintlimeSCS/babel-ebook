@@ -40,6 +40,22 @@ pub trait Translator: Send + Sync {
         context: &TranslateContext<'_>,
     ) -> Result<String, BabelEbookError>;
 
+    /// Optional strict response contract for one paragraph's ordered fragments.
+    /// Providers without native schema support keep the ordinary array prompt.
+    fn fragment_response_format(&self, _count: usize) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Translate all fragments together, with the same request/retry limits.
+    async fn translate_fragments(
+        &self,
+        text: &str,
+        context: &TranslateContext<'_>,
+        _count: usize,
+    ) -> Result<String, BabelEbookError> {
+        self.translate(text, context).await
+    }
+
     /// Verify that the provider is reachable and credentials are valid.
     ///
     /// The default implementation succeeds unconditionally; providers should

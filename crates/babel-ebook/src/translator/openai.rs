@@ -3,6 +3,7 @@
 use crate::core::BabelEbookError;
 use crate::translator::http_common::{
     openai_compatible_health_check, openai_compatible_list_models, openai_compatible_translate,
+    openai_compatible_translate_with_format,
 };
 use crate::translator::{TranslateContext, Translator};
 use async_openai::config::{Config as _, OpenAIConfig};
@@ -42,6 +43,15 @@ impl OpenAiTranslator {
     fn config(&self) -> &OpenAIConfig {
         self.client.config()
     }
+
+    fn output_limit(&self) -> Result<u32, BabelEbookError> {
+        u32::try_from(self.max_tokens).map_err(|_| {
+            BabelEbookError::Configuration(format!(
+                "max_tokens {} exceeds u32::MAX",
+                self.max_tokens
+            ))
+        })
+    }
 }
 
 #[async_trait]
@@ -58,6 +68,40 @@ impl Translator for OpenAiTranslator {
         serde_json::json!([self.name(), self.config().api_base(), self.temperature]).to_string()
     }
 
+    fn fragment_response_format(&self, count: usize) -> Option<serde_json::Value> {
+        // Apply the new contract only to the affected, known-supported native
+        // GPT-5.4 models. Unknown/proxy models retain their existing protocol.
+        let native = self.config().api_base().trim_end_matches('/') == "https://api.openai.com/v1";
+        let supported = self.model == "gpt-5.4"
+            || self.model.strip_prefix("gpt-5.4-").is_some_and(|suffix| {
+                suffix == "mini"
+                    || suffix.starts_with("mini-20")
+                    || suffix == "nano"
+                    || suffix.starts_with("nano-20")
+                    || suffix.starts_with("20")
+            });
+        (native && supported).then(|| fragment_format(count))
+    }
+
+    async fn translate_fragments(
+        &self,
+        text: &str,
+        context: &TranslateContext<'_>,
+        count: usize,
+    ) -> Result<String, BabelEbookError> {
+        openai_compatible_translate_with_format(
+            &self.client,
+            &self.model,
+            context.system_prompt,
+            text,
+            self.output_limit()?,
+            self.temperature,
+            "OpenAI",
+            self.fragment_response_format(count),
+        )
+        .await
+    }
+
     async fn health_check(&self) -> Result<(), BabelEbookError> {
         openai_compatible_health_check(self.config(), "OpenAI").await
     }
@@ -71,19 +115,12 @@ impl Translator for OpenAiTranslator {
         text: &str,
         context: &TranslateContext<'_>,
     ) -> Result<String, BabelEbookError> {
-        let max_tokens = u32::try_from(self.max_tokens).map_err(|_| {
-            BabelEbookError::Configuration(format!(
-                "max_tokens {} exceeds u32::MAX",
-                self.max_tokens
-            ))
-        })?;
-
         openai_compatible_translate(
             &self.client,
             &self.model,
             context.system_prompt,
             text,
-            max_tokens,
+            self.output_limit()?,
             self.temperature,
             "OpenAI",
         )
@@ -91,9 +128,58 @@ impl Translator for OpenAiTranslator {
     }
 }
 
+fn fragment_format(count: usize) -> serde_json::Value {
+    serde_json::json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "paragraph_fragments",
+            "strict": true,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "translations": {
+                        "type": "array",
+                        "minItems": count,
+                        "maxItems": count,
+                        "items": {"type": "string", "pattern": "\\S"}
+                    }
+                },
+                "required": ["translations"],
+                "additionalProperties": false
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_fragments_are_limited_to_supported_native_models() {
+        for model in ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-mini-2026-03-17"] {
+            let translator =
+                OpenAiTranslator::new("fake".into(), Some(model.into()), None, 2000, 0.3);
+            let format = translator.fragment_response_format(5).unwrap();
+            assert_eq!(format["json_schema"]["strict"], true);
+            let array = &format["json_schema"]["schema"]["properties"]["translations"];
+            assert_eq!(array["minItems"], 5);
+            assert_eq!(array["maxItems"], 5);
+            assert_eq!(array["items"]["pattern"], "\\S");
+        }
+        for (model, base) in [
+            ("gpt-4.1-mini", None),
+            ("gpt-5.4-chat-latest", None),
+            ("ft:gpt-5.4-mini:custom", None),
+            ("gpt-5.4-mini", Some("https://proxy.example/v1".into())),
+        ] {
+            assert!(
+                OpenAiTranslator::new("fake".into(), Some(model.into()), base, 2000, 0.3)
+                    .fragment_response_format(5)
+                    .is_none()
+            );
+        }
+    }
 
     #[test]
     fn cache_identity_tracks_model_endpoint_and_temperature_but_not_credentials() {

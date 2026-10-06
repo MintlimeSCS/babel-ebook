@@ -387,10 +387,7 @@ async fn invented_formatting_in_fallback_is_rejected_and_not_cached() {
         None,
     )
     .await;
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("formatting markers"));
+    assert!(result.unwrap_err().to_string().contains("invalid JSON"));
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
@@ -622,4 +619,244 @@ async fn many_marker_failures_add_at_most_one_request_per_chapter() {
         );
         assert_eq!(calls.iter().filter(|s| s.contains("[[BABEL:")).count(), 1);
     }
+}
+
+struct StrictFragments {
+    calls: Mutex<Vec<String>>,
+    reply: Option<&'static str>,
+    enabled: std::sync::atomic::AtomicBool,
+    format_padding: String,
+}
+
+#[async_trait]
+impl Translator for StrictFragments {
+    fn name(&self) -> String {
+        "strict-fragments".into()
+    }
+    fn max_output_tokens(&self) -> usize {
+        2000
+    }
+    fn fragment_response_format(&self, count: usize) -> Option<serde_json::Value> {
+        self.enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .then(|| serde_json::json!({"type":"json_schema", "count":count, "description":self.format_padding}))
+    }
+    async fn translate(
+        &self,
+        text: &str,
+        _: &TranslateContext<'_>,
+    ) -> Result<String, BabelEbookError> {
+        self.calls.lock().unwrap().push(text.into());
+        Ok(text.into())
+    }
+    async fn translate_fragments(
+        &self,
+        text: &str,
+        context: &TranslateContext<'_>,
+        count: usize,
+    ) -> Result<String, BabelEbookError> {
+        self.calls.lock().unwrap().push(text.into());
+        assert!(context.system_prompt.contains("JSON object"));
+        assert!(!text.contains("[[BABEL:"));
+        if let Some(reply) = self.reply {
+            return Ok(reply.into());
+        }
+        let runs: Vec<String> = serde_json::from_str(text).unwrap();
+        assert_eq!(runs.len(), count);
+        Ok(serde_json::json!({"translations":runs}).to_string())
+    }
+}
+
+fn strict_model(reply: Option<&'static str>) -> StrictFragments {
+    StrictFragments {
+        calls: Mutex::new(Vec::new()),
+        reply,
+        enabled: true.into(),
+        format_padding: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn single_fragment_preserves_local_format_without_json_schema_overhead() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = TranslationCache::new(dir.path().into());
+    let model = strict_model(None);
+    let config = Config::default();
+    let output = process_document(
+        b"<p><em>Hello there</em></p>",
+        &model,
+        &config.translation_options(),
+        &cache,
+        0,
+        "ch1",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("<em>Hello there</em>"));
+    assert_eq!(
+        *model.calls.lock().unwrap(),
+        vec!["Hello there".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn strict_fragments_need_no_marker_repair_or_per_fragment_requests_and_reuse_cache() {
+    for refine in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TranslationCache::new(dir.path().into());
+        let model = strict_model(None);
+        let config = Config {
+            refine,
+            ..Config::default()
+        };
+        let html = (0..40).map(|i| format!("<p>Unique paragraph {i} <em>emphasis {i}</em> and <a href='#n'>link {i}</a>.</p>")).collect::<String>();
+        for _ in 0..2 {
+            process_document(
+                html.as_bytes(),
+                &model,
+                &config.translation_options(),
+                &cache,
+                0,
+                "ch1",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                model.calls.lock().unwrap().len(),
+                if refine { 80 } else { 40 }
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn strict_fragments_distinguish_missing_and_empty_replies_without_retry_or_cache() {
+    for (reply, message) in [
+        (
+            r#"{"translations":["one"]}"#,
+            "returned 1 fragments; expected 2",
+        ),
+        (
+            r#"{"translations":["one"," "]}"#,
+            "empty fragment at position 2 of 2",
+        ),
+        (r#"{"translations":["one",null]}"#, "invalid JSON"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TranslationCache::new(dir.path().into());
+        let config = Config::default();
+        let html = b"<p>First <em>second</em>.</p>";
+        let bad = strict_model(Some(reply));
+        let err = process_document(
+            html,
+            &bad,
+            &config.translation_options(),
+            &cache,
+            0,
+            "ch1",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains(message), "{err}");
+        assert_eq!(bad.calls.lock().unwrap().len(), 1);
+        let good = strict_model(None);
+        process_document(
+            html,
+            &good,
+            &config.translation_options(),
+            &cache,
+            0,
+            "ch1",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            good.calls.lock().unwrap().len(),
+            1,
+            "invalid response must not be cached"
+        );
+    }
+}
+
+#[tokio::test]
+async fn enabling_strict_format_keeps_successful_v2_cache_compatible() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = TranslationCache::new(dir.path().into());
+    let model = strict_model(None);
+    model
+        .enabled
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let config = Config::default();
+    let html = b"<p>First <em>second</em>.</p>";
+    let before = process_document(
+        html,
+        &model,
+        &config.translation_options(),
+        &cache,
+        0,
+        "ch1",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(model.calls.lock().unwrap().len(), 1);
+    model
+        .enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let after = process_document(
+        html,
+        &model,
+        &config.translation_options(),
+        &cache,
+        0,
+        "ch1",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(
+        model.calls.lock().unwrap().len(),
+        1,
+        "existing successful cache must cost zero new requests"
+    );
+}
+
+#[tokio::test]
+async fn strict_schema_overhead_is_included_in_input_budget_before_sending() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = TranslationCache::new(dir.path().into());
+    let mut model = strict_model(None);
+    model.format_padding = "contract context ".repeat(1000);
+    let config = Config {
+        max_input_tokens: 1000,
+        system_prompt: Some("Translate".into()),
+        ..Config::default()
+    };
+    let err = process_document(
+        b"<p>First <em>second</em>.</p>",
+        &model,
+        &config.translation_options(),
+        &cache,
+        0,
+        "ch1",
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("input-token budget"), "{err}");
+    assert!(model.calls.lock().unwrap().is_empty());
 }

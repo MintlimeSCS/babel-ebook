@@ -2,6 +2,19 @@
 
 ## Unreleased — EPUB formatting fallback and rate-limit coordination
 
+- Use strict JSON Schema for native GPT-5.4 paragraph fragments: require the
+  exact number of nonblank strings and keep formatting local. Send the strict
+  request first, avoiding the initial failed marker request. Retain the same
+  cache/checkpoint identities and token/retry limits; count schema overhead in
+  input and rate-limit budgets. Report count and empty-position errors separately.
+- Reuse translated date headings for numbered navigation titles, keeping chapter
+  numbers local and avoiding an extra title API call or a chapter number becoming
+  a day of the month. This also corrects cached successful chapters on resume.
+- Show only resume records matching the selected source file's content hash.
+  Hide unrelated books, prompt for a source before loading, and distinguish
+  loading/read errors from an empty result. Keep resume selection manual.
+- Fix camelCase arguments when requesting the desktop checkpoint list and
+  cover matching/hidden records and resume selection with UI regression tests.
 - Preserve empty page anchors as opaque elements; recover altered inline
   markers by translating all text runs in one structured request while keeping
   marker positions locally. Switch the rest of that chapter to structured mode
@@ -301,3 +314,5 @@
 ## [0.2.0] - 2026-07-05
 
 - Release version 0.2.0.
+
+修正續譯清單的 Tauri 呼叫參數名稱：已有檢查點時不再因參數錯誤而顯示空清單。新增 Windows 續譯清單回歸測試。

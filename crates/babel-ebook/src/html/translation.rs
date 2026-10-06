@@ -14,6 +14,37 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(super) struct FormattingState {
     structured: AtomicBool,
 }
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FragmentResponse {
+    translations: Vec<String>,
+}
+
+fn decode_fragments(
+    response: &str,
+    wrapped: bool,
+    plain: bool,
+) -> Result<Vec<String>, BabelEbookError> {
+    let response = response.trim();
+    if plain {
+        return Ok(vec![response.to_string()]);
+    }
+    // Accept a surrounding code fence without relaxing structural validation.
+    let json = response.strip_prefix("```").map_or(response, |fenced| {
+        fenced
+            .split_once('\n')
+            .and_then(|(_, body)| body.trim().strip_suffix("```"))
+            .unwrap_or(response)
+            .trim()
+    });
+    if wrapped {
+        serde_json::from_str::<FragmentResponse>(json).map(|r| r.translations)
+    } else {
+        serde_json::from_str(json)
+    }
+    .map_err(|_| BabelEbookError::ApiError("Formatting response is invalid JSON for the required fragment contract; no further repair requests were sent".into()))
+}
 use super::progress::emit_chunk_progress;
 
 async fn cancellable_translate(
@@ -52,6 +83,11 @@ async fn translate_guarded(
         return Ok(chunk.to_string());
     }
     let has_markers = marker_regex().is_match(chunk);
+    if has_markers && translator.fragment_response_format(1).is_some() {
+        // Native strict output avoids even the first failed marker request.
+        return translate_structured(chunk, translator, context, max_input_tokens, cancellation)
+            .await;
+    }
     if !has_markers || !formatting.structured.load(Ordering::Relaxed) {
         let result = cancellable_translate(chunk, translator, context, cancellation).await?;
         if validate_markers(chunk, &result).is_ok() {
@@ -92,10 +128,32 @@ async fn translate_structured(
     if meaningful.is_empty() {
         return Ok(chunk.to_string());
     }
-    let payload = serde_json::to_string(&meaningful).expect("text runs serialize");
-    let prompt = format!("{}\nInput is an ordered JSON array of text fragments from one paragraph. Translate every string using the entire array as context. Return ONLY a valid JSON array of the same number of strings in the same order, with no omissions, merging, commentary or code fence. Preserve each fragment boundary.", context.system_prompt.replace(MARKUP_PROMPT, ""));
+    let mut format = translator.fragment_response_format(meaningful.len());
+    let plain_fragment = format.is_some() && meaningful.len() == 1;
+    // A single text run needs no JSON or schema at all: translate its text
+    // normally and restore surrounding elements locally, saving input tokens.
+    if plain_fragment {
+        format = None;
+    }
+    let payload = if plain_fragment {
+        meaningful[0].to_string()
+    } else {
+        serde_json::to_string(&meaningful).expect("text runs serialize")
+    };
+    let output_rule = if format.is_some() {
+        "Return ONLY a JSON object with a translations array."
+    } else {
+        "Return ONLY a JSON array."
+    };
+    let base_prompt = context.system_prompt.replace(MARKUP_PROMPT, "");
+    let prompt = if plain_fragment {
+        base_prompt
+    } else {
+        format!("{base_prompt}\nInput is an ordered JSON array of text fragments from one paragraph. Translate each fragment in context, including short fragments. {output_rule} Keep exactly {} nonempty strings in source order. Do not merge, omit or repeat text, or add commentary or code fences. Preserve fragment boundaries.", meaningful.len())
+    };
     if count_tokens(&prompt)
         .saturating_add(count_tokens(&payload))
+        .saturating_add(format.as_ref().map_or(0, |f| count_tokens(&f.to_string())))
         .saturating_add(32)
         > max_input_tokens
     {
@@ -105,22 +163,24 @@ async fn translate_structured(
         system_prompt: &prompt,
         target_lang: context.target_lang,
     };
-    let response =
-        cancellable_translate(&payload, translator, &repair_context, cancellation).await?;
-    let response = response.trim();
-    // Accept a surrounding code fence without relaxing structural validation.
-    let json = response.strip_prefix("```").map_or(response, |fenced| {
-        fenced
-            .split_once('\n')
-            .and_then(|(_, body)| body.trim().strip_suffix("```"))
-            .unwrap_or(response)
-            .trim()
-    });
-    let translated: Vec<String> = serde_json::from_str(json).map_err(|_| {
-        BabelEbookError::ApiError("The model changed formatting markers and its single structured repair was invalid; no further repair requests were sent".into())
-    })?;
-    if translated.len() != meaningful.len() || translated.iter().any(|t| t.trim().is_empty()) {
-        return Err(BabelEbookError::ApiError("The model changed formatting markers and its single structured repair omitted text; no further repair requests were sent".into()));
+    let request = translator.translate_fragments(&payload, &repair_context, meaningful.len());
+    let response = if plain_fragment {
+        cancellable_translate(&payload, translator, &repair_context, cancellation).await?
+    } else if let Some(token) = cancellation {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => return Err(BabelEbookError::Cancelled),
+            result = request => result?,
+        }
+    } else {
+        request.await?
+    };
+    let translated = decode_fragments(&response, format.is_some(), plain_fragment)?;
+    if translated.len() != meaningful.len() {
+        return Err(BabelEbookError::ApiError(format!("Formatting response returned {} fragments; expected {}. No further repair requests were sent", translated.len(), meaningful.len())));
+    }
+    if let Some(index) = translated.iter().position(|t| t.trim().is_empty()) {
+        return Err(BabelEbookError::ApiError(format!("Formatting response returned an empty fragment at position {} of {}. No further repair requests were sent", index + 1, meaningful.len())));
     }
     let mut translated = translated.iter();
     let mut output = String::new();

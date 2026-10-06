@@ -272,6 +272,16 @@ pub async fn translate_epub_with_cancellation(
                 if failed_hrefs.contains(href.as_str()) {
                     continue;
                 }
+                // Keep the chapter number local and reuse its translated date
+                // heading, instead of paying for another title translation.
+                if let Some(label) = numbered_title_from_document(
+                    &title,
+                    &book.chapters[*index].content,
+                    &config.target_lang,
+                ) {
+                    book.chapters[*index].title = Some(label);
+                    continue;
+                }
                 match translate_title(
                     *index,
                     &title,
@@ -380,6 +390,35 @@ pub fn run_dry_run(
     (total, count)
 }
 
+fn numbered_title_from_document(title: &str, html: &[u8], target_lang: &str) -> Option<String> {
+    use kuchiki::traits::TendrilSink;
+    let (number, remainder) = title.trim().split_once(char::is_whitespace)?;
+    if number.is_empty() || !number.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let doc = kuchiki::parse_html().one(std::str::from_utf8(html).ok()?);
+    if doc.select_first("body h1").ok()?.text_contents().trim() != number {
+        return None;
+    }
+    let normalize = |s: &str| s.split_whitespace().collect::<String>().to_lowercase();
+    let headings: Vec<_> = doc.select("body h2").ok()?.collect();
+    let original = headings.first()?;
+    if normalize(&original.text_contents()) != normalize(remainder) {
+        return None;
+    }
+    let translated = headings
+        .iter()
+        .find(|h| h.attributes.borrow().get("lang") == Some(target_lang));
+    let label = if let Some(heading) = translated {
+        heading.text_contents().trim().to_string()
+    } else if !remainder.chars().any(char::is_alphabetic) {
+        remainder.trim().to_string()
+    } else {
+        return None;
+    };
+    (!label.is_empty()).then(|| format!("{number} {label}"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn translate_title(
     index: usize,
@@ -444,4 +483,44 @@ pub fn estimate_source_tokens(book: &crate::epub::EpubBook, indices: &[usize]) -
         })
         .sum();
     (total, indices.len())
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::numbered_title_from_document;
+
+    #[test]
+    fn numbered_toc_reuses_date_heading_without_treating_number_as_a_day() {
+        let html = br#"<html><body><h1>28</h1><h2 lang="en">FEBRUARY 1&#x2013;2, 1959</h2><h2 lang="zh-TW">1959-02-01~02</h2></body></html>"#;
+        assert_eq!(
+            numbered_title_from_document("28 February 1–2, 1959", html, "zh-TW"),
+            Some("28 1959-02-01~02".into())
+        );
+        assert_eq!(
+            numbered_title_from_document("29 February 1–2, 1959", html, "zh-TW"),
+            None
+        );
+        assert_eq!(
+            numbered_title_from_document("28 March 1959", html, "zh-TW"),
+            None
+        );
+        assert_eq!(
+            numbered_title_from_document("Chapter 28", html, "zh-TW"),
+            None
+        );
+    }
+
+    #[test]
+    fn numbered_toc_preserves_numeric_year_and_requires_a_translated_date() {
+        let year = b"<body><h1>7</h1><h2>2012</h2></body>";
+        assert_eq!(
+            numbered_title_from_document("7 2012", year, "zh-TW"),
+            Some("7 2012".into())
+        );
+        let untranslated = b"<body><h1>6</h1><h2>FEBRUARY 1959</h2></body>";
+        assert_eq!(
+            numbered_title_from_document("6 February 1959", untranslated, "zh-TW"),
+            None
+        );
+    }
 }

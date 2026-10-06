@@ -119,7 +119,6 @@ fn build_chat_completion_request(
 ///
 /// This helper builds the standard system/user message request, applies the
 /// translate timeout, retries on failure, and extracts the first choice content.
-#[allow(clippy::significant_drop_tightening)] // The queue lock intentionally covers HTTP and retries.
 pub async fn openai_compatible_translate(
     client: &Client<OpenAIConfig>,
     model: &str,
@@ -129,14 +128,45 @@ pub async fn openai_compatible_translate(
     temperature: f32,
     provider_name: &str,
 ) -> Result<String, BabelEbookError> {
-    let request =
+    openai_compatible_translate_with_format(
+        client,
+        model,
+        system_prompt,
+        text,
+        max_tokens,
+        temperature,
+        provider_name,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::significant_drop_tightening)]
+pub(super) async fn openai_compatible_translate_with_format(
+    client: &Client<OpenAIConfig>,
+    model: &str,
+    system_prompt: &str,
+    text: &str,
+    max_tokens: u32,
+    temperature: f32,
+    provider_name: &str,
+    response_format: Option<Value>,
+) -> Result<String, BabelEbookError> {
+    let format_tokens = response_format.as_ref().map_or(0, |format| {
+        crate::chunking::count_tokens(&format.to_string())
+    });
+    let mut request =
         build_chat_completion_request(model, system_prompt, text, max_tokens, temperature);
+    if let Some(format) = response_format {
+        request["response_format"] = format;
+    }
     // One gate per endpoint/model across chapters and jobs. Keeping the gate
     // through retries prevents every concurrent chapter from hitting the same
     // exhausted token bucket. No credentials are used as map keys or persisted.
     let gate = request_gate(&client.config().url("/chat/completions"), model);
     let budget = crate::chunking::count_tokens(system_prompt)
         .saturating_add(crate::chunking::count_tokens(text))
+        .saturating_add(format_tokens)
         .saturating_add(max_tokens as usize)
         .saturating_add(32);
     let mut schedule = gate.lock().await;
@@ -734,6 +764,42 @@ mod tests {
 
     fn successful_chat() -> String {
         r#"{"choices":[{"message":{"content":"你好"},"finish_reason":"stop"}]}"#.into()
+    }
+
+    #[tokio::test]
+    async fn strict_fragment_contract_uses_one_http_call_and_same_output_limit() {
+        let content = r#"{"translations":["你好","世界"]}"#;
+        let response =
+            serde_json::json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}]})
+                .to_string();
+        let (url, calls, server) = mock_chat_server(vec![(200, "", response)]).await;
+        let client = Client::with_config(
+            OpenAIConfig::new()
+                .with_api_key("fake-key")
+                .with_api_base(url),
+        );
+        let format = serde_json::json!({"type":"json_schema","json_schema":{"name":"test","strict":true,"schema":{"type":"object"}}});
+        let result = openai_compatible_translate_with_format(
+            &client,
+            "gpt-5.4-mini-2026-03-17",
+            "Translate fragments",
+            r#"["hello","world"]"#,
+            2000,
+            0.3,
+            "OpenAI",
+            Some(format.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, content);
+        server.await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let request = &calls[0].1;
+        assert_eq!(request["response_format"], format);
+        assert_eq!(request["max_completion_tokens"], 2000);
+        assert!(request.get("max_tokens").is_none());
+        assert!(request.get("temperature").is_none());
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
 //! Offline regression: a mock model drops all formatting markers.
-//! Usage: cargo run -p babel-ebook --example verify_epub_structure -- book.epub
+//! Usage: cargo run -p babel-ebook --example verify_epub_structure -- book.epub [--strict]
 //! This checks structure only; it does not produce a readable translation.
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -13,7 +13,10 @@ use babel_ebook::html::process_document;
 use babel_ebook::{BabelEbookError, Config, TranslateContext, TranslationCache, Translator};
 use kuchiki::traits::TendrilSink;
 
-struct DroppedMarkers(AtomicUsize);
+struct DroppedMarkers {
+    calls: AtomicUsize,
+    strict_contract: Option<Box<dyn Translator>>,
+}
 #[async_trait]
 impl Translator for DroppedMarkers {
     fn name(&self) -> String {
@@ -22,12 +25,31 @@ impl Translator for DroppedMarkers {
     fn max_output_tokens(&self) -> usize {
         2000
     }
+    fn fragment_response_format(&self, count: usize) -> Option<serde_json::Value> {
+        self.strict_contract
+            .as_ref()
+            .and_then(|t| t.fragment_response_format(count))
+    }
+    async fn translate_fragments(
+        &self,
+        text: &str,
+        context: &TranslateContext<'_>,
+        count: usize,
+    ) -> Result<String, BabelEbookError> {
+        if self.strict_contract.is_none() {
+            return self.translate(text, context).await;
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let runs: Vec<String> = serde_json::from_str(text).unwrap();
+        assert_eq!(runs.len(), count);
+        Ok(serde_json::json!({"translations":runs}).to_string())
+    }
     async fn translate(
         &self,
         text: &str,
         _: &TranslateContext<'_>,
     ) -> Result<String, BabelEbookError> {
-        self.0.fetch_add(1, Ordering::Relaxed);
+        self.calls.fetch_add(1, Ordering::Relaxed);
         static RE: OnceLock<regex::Regex> = OnceLock::new();
         let re =
             RE.get_or_init(|| regex::Regex::new(r"\[\[BABEL:\d+:(OPEN|CLOSE|KEEP)\]\]").unwrap());
@@ -49,7 +71,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let book = read_epub(Path::new(&path))?;
     let temporary = tempfile::tempdir()?;
     let cache = TranslationCache::new(temporary.path().into());
-    let model = DroppedMarkers(AtomicUsize::new(0));
+    let strict = std::env::args().any(|arg| arg == "--strict");
+    let contract = if strict {
+        let config = Config {
+            api_key: Some("fake-offline-key".into()),
+            model: "gpt-5.4-mini-2026-03-17".into(),
+            ..Config::default()
+        };
+        // Consult the real provider's schema only. Translation remains mocked.
+        let mut provider = babel_ebook::config::ProviderConfig::for_provider("openai");
+        provider.default_model = config.model.clone();
+        let translator = babel_ebook::get_translator("openai", Some(&provider), &config, false)?;
+        assert!(translator.fragment_response_format(2).is_some());
+        Some(translator)
+    } else {
+        None
+    };
+    let model = DroppedMarkers {
+        calls: AtomicUsize::new(0),
+        strict_contract: contract,
+    };
     let mut records = Vec::new();
     for refine in [false, true] {
         let config = Config {
@@ -117,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!(
         "{}",
-        serde_json::json!({"chapters": book.chapters.len(), "checks": records.len(), "mock_requests": model.0.load(Ordering::Relaxed), "results": records})
+        serde_json::json!({"chapters": book.chapters.len(), "checks": records.len(), "strict": strict, "mock_requests": model.calls.load(Ordering::Relaxed), "results": records})
     );
     Ok(())
 }
