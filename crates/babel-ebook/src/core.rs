@@ -313,12 +313,18 @@ pub async fn translate_epub_with_cancellation(
 
     ensure_not_cancelled(cancellation)?;
 
+    let note_refs = crate::html::repair_book_notes(&mut book)?;
+    tracing::info!(
+        note_refs,
+        "repaired note references locally without translation requests"
+    );
+
     tracing::info!(output = %config.output.display(), "writing translated EPUB");
     book.write(&config.output)?;
     tracing::info!(output = %config.output.display(), "EPUB written successfully");
+    report_failures(&failures, translatable_indices.len())?;
     emit_progress(progress, ProgressEvent::Completed);
-
-    report_failures(&failures, translatable_indices.len())
+    Ok(())
 }
 
 fn report_failures(
@@ -336,16 +342,12 @@ fn report_failures(
     let msg = t!("log_failed_documents", documents = documents);
     tracing::warn!("{msg}");
 
-    // If every translatable chapter failed, treat the whole translation as
-    // failed so callers (e.g. the desktop queue) can surface a failed status
-    // and offer a retry. Partial failures still write the best-effort EPUB.
-    if failures.len() == total_chapters {
-        return Err(BabelEbookError::ApiError(
-            t!("log_failed_documents", documents = documents).to_string(),
-        ));
-    }
-
-    Ok(())
+    // The best-effort EPUB and checkpoints have already been saved. Surface
+    // partial failure to the desktop instead of showing an all-success status.
+    Err(BabelEbookError::ApiError(format!(
+        "{} of {} chapters failed ({documents}). Partial EPUB saved; resume this run to retry only the failed chapters.",
+        failures.len(), total_chapters
+    )))
 }
 
 fn ensure_not_cancelled(cancellation: Option<&CancellationToken>) -> Result<(), BabelEbookError> {

@@ -1,3 +1,14 @@
+# Custom program revision R01
+
+This custom source revision belongs to work item V00002. Prompt V2.6 remains a separate version.
+Protected inline markers stay local. Successful compatible v2 cache entries are reused; invalid marker/empty entries are ignored individually. No paid formatting repair is attempted. Native supported OpenAI models keep strict fragment schemas; other providers return a locally validated JSON array.
+
+Before writing, the core checks the whole book for explicit notes and reciprocal superscript references. It adds noteref/footnote semantics and return links, and uses an adjacent Chinese note copy as the target in bilingual output. A missing note document path is repaired only when its fragment ID has a unique, verified note target. Ambiguous links remain intact. The popup behavior still needs verification in the user's Readest version.
+
+Self-closing XHTML anchors are expanded before HTML parsing; empty non-void elements are serialized with closing tags. This prevents the HTML parser from reproducing page-anchor IDs in later paragraphs.
+
+Any failed chapter saves a best-effort EPUB and resumable checkpoints but returns an error. Resume the current run to retain completed chapters.
+
 # 巴别塔 · BabelEbook
 
 > GPT-5 compatibility patch: GPT-5 requests now send `max_completion_tokens`.

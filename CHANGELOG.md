@@ -1,3 +1,12 @@
+# Custom revision R01 — work V00002 (2026-10-07)
+
+- Keep protected EPUB markers local for all providers; marked paragraphs use one text-fragment request without paid format-repair calls.
+- Validate successful cache entries before reuse while retaining the translation-v2 namespace and request settings.
+- Repair unambiguous note references, note containers and return links offline before writing the EPUB. Chinese note copies become the popup target in bilingual output.
+- Expand self-closing XHTML anchors before HTML parsing and emit explicit closing tags for empty non-void HTML elements to prevent duplicate page-anchor IDs.
+- Save partial output but return an error when any chapter fails; do not emit all-success completion.
+- Show R01 on About and name the manual Windows build artifact BabelEbook-Windows-R01.
+
 # Changelog
 
 ## Unreleased — EPUB formatting fallback and rate-limit coordination

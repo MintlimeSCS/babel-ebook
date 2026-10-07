@@ -8,12 +8,9 @@ use crate::translator::{TranslateContext, Translator};
 use sha2::{Digest, Sha256};
 
 use super::markup::{marker_regex, validate_markers, MARKUP_PROMPT};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
-pub(super) struct FormattingState {
-    structured: AtomicBool,
-}
+pub(super) struct FormattingState {}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,16 +61,15 @@ async fn cancellable_translate(
     }
 }
 
-/// Switch a chapter to one-call structured translation after its first marker
-/// failure. This adds at most one repair request per chapter, never one request
-/// per text run; subsequent marked paragraphs use structured translation first.
+/// Keep protected formatting local for every provider. A marked paragraph is
+/// translated once as text fragments; a failed format never triggers a paid repair.
 async fn translate_guarded(
     chunk: &str,
     translator: &dyn Translator,
     context: &TranslateContext<'_>,
     max_input_tokens: usize,
     cancellation: Option<&CancellationToken>,
-    formatting: &FormattingState,
+    _formatting: &FormattingState,
 ) -> Result<String, BabelEbookError> {
     if !marker_regex()
         .replace_all(chunk, "")
@@ -82,24 +78,18 @@ async fn translate_guarded(
     {
         return Ok(chunk.to_string());
     }
-    let has_markers = marker_regex().is_match(chunk);
-    if has_markers && translator.fragment_response_format(1).is_some() {
-        // Native strict output avoids even the first failed marker request.
+    if marker_regex().is_match(chunk) {
         return translate_structured(chunk, translator, context, max_input_tokens, cancellation)
             .await;
     }
-    if !has_markers || !formatting.structured.load(Ordering::Relaxed) {
-        let result = cancellable_translate(chunk, translator, context, cancellation).await?;
-        if validate_markers(chunk, &result).is_ok() {
-            return Ok(result);
-        }
-        if !has_markers {
-            validate_markers(chunk, &result)?;
-        }
-        formatting.structured.store(true, Ordering::Relaxed);
-        tracing::warn!("Model changed inline markers; using one structured request per paragraph for the rest of this chapter");
+    let result = cancellable_translate(chunk, translator, context, cancellation).await?;
+    validate_markers(chunk, &result)?;
+    if result.trim().is_empty() {
+        return Err(BabelEbookError::ApiError(
+            "Translation returned empty text; no successful cache was written".into(),
+        ));
     }
-    translate_structured(chunk, translator, context, max_input_tokens, cancellation).await
+    Ok(result)
 }
 
 async fn translate_structured(
@@ -129,7 +119,7 @@ async fn translate_structured(
         return Ok(chunk.to_string());
     }
     let mut format = translator.fragment_response_format(meaningful.len());
-    let plain_fragment = format.is_some() && meaningful.len() == 1;
+    let plain_fragment = meaningful.len() == 1;
     // A single text run needs no JSON or schema at all: translate its text
     // normally and restore surrounding elements locally, saving input tokens.
     if plain_fragment {
@@ -202,6 +192,17 @@ async fn translate_structured(
     }
     validate_markers(chunk, &output)?;
     Ok(output)
+}
+
+async fn valid_cached(cache: &TranslationCache, scope: &str, source: &str) -> Option<String> {
+    let cached = cache.get_async(scope, source).await?;
+    if cached.trim().is_empty() || validate_markers(source, &cached).is_err() {
+        tracing::warn!(
+            "Ignoring an invalid cached translation; other successful cache entries are retained"
+        );
+        return None;
+    }
+    Some(cached)
 }
 
 fn cache_scope(
@@ -314,7 +315,7 @@ pub(super) async fn translate_text_with_state(
     // First pass. When refinement is disabled we can return a cached full-text
     // result immediately; otherwise the cached translation still needs to be
     // polished.
-    let first_pass = if let Some(cached) = cache.get_async(&translate_name, text).await {
+    let first_pass = if let Some(cached) = valid_cached(cache, &translate_name, text).await {
         if !options.refine {
             return Ok(cached);
         }
@@ -338,7 +339,7 @@ pub(super) async fn translate_text_with_state(
                 chunk_total,
                 false,
             );
-            if let Some(cached) = cache.get_async(&translate_name, chunk).await {
+            if let Some(cached) = valid_cached(cache, &translate_name, chunk).await {
                 translated_parts.push(cached);
                 emit_chunk_progress(
                     progress,
@@ -405,7 +406,7 @@ pub(super) async fn translate_text_with_state(
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(BabelEbookError::Cancelled);
         }
-        if let Some(cached) = cache.get_async(&refine_name, chunk).await {
+        if let Some(cached) = valid_cached(cache, &refine_name, chunk).await {
             refined_parts.push(cached);
             continue;
         }

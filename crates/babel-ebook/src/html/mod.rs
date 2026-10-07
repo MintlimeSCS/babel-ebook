@@ -2,7 +2,6 @@
 
 use std::collections::HashSet;
 
-use kuchiki::traits::TendrilSink;
 use kuchiki::{Attribute, ExpandedName, NodeRef};
 use markup5ever::{namespace_url, ns, QualName};
 
@@ -23,11 +22,13 @@ use selection::{
 
 mod insertion;
 mod markup;
+mod notes;
 mod progress;
 mod selection;
 mod translation;
 mod xhtml;
 
+pub use notes::repair_book_notes;
 pub use translation::translate_text;
 
 /// Translate all translatable elements in an EPUB HTML document and insert
@@ -49,7 +50,7 @@ pub async fn process_document(
 ) -> Result<Vec<u8>, BabelEbookError> {
     let html_str = std::str::from_utf8(html)
         .map_err(|e| BabelEbookError::Configuration(format!("invalid UTF-8 HTML: {e}")))?;
-    let doc = kuchiki::parse_html().one(html_str);
+    let doc = xhtml::parse(html_str);
 
     if let Some(font) = &options.output_font {
         inject_font_style(&doc, font);

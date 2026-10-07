@@ -301,7 +301,7 @@ async fn core_translate_epub_writes_partial_output_on_partial_failure() {
         None,
     )
     .await
-    .expect("partial failure should still succeed at the top level");
+    .expect_err("partial EPUB is saved, but a failed chapter must be reported");
 
     assert!(
         output.exists(),

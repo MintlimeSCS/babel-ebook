@@ -162,3 +162,12 @@ test("navigates through all settings tabs and persists changes", async () => {
 
   await browser.close();
 });
+
+
+test("About shows the custom program revision", async () => {
+  const browser = await chromium.connectOverCDP(cdpUrl);
+  const page = browser.contexts()[0].pages()[0];
+  await page.getByRole("button", { name: "About", exact: true }).click();
+  await expect(page.locator(".about-page")).toContainText("R01");
+  await browser.close();
+});

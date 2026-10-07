@@ -323,7 +323,7 @@ async fn resume_skips_completed_chapters() {
         None,
     )
     .await
-    .expect("first run should complete without error");
+    .expect_err("first run saves partial output and reports its failed chapter");
 
     let ch01_first = read_chapter_content(&output1, "ch01");
     let ch02_first = read_chapter_content(&output1, "ch02");

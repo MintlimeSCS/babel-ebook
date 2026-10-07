@@ -2,7 +2,32 @@
 
 use std::fmt::Write;
 
+use kuchiki::traits::TendrilSink;
 use kuchiki::{NodeData, NodeRef};
+use regex::Regex;
+use std::sync::OnceLock;
+
+/// Expand empty XHTML inline elements before the HTML5 parser sees them.
+/// HTML5 ignores the self-closing flag on anchors and can reconstruct their IDs
+/// across subsequent paragraphs. XML and EPUB permit these empty anchors.
+pub(super) fn parse(html: &str) -> NodeRef {
+    static EMPTY: OnceLock<Regex> = OnceLock::new();
+    static PROTECTED: OnceLock<Regex> = OnceLock::new();
+    let pattern = EMPTY.get_or_init(|| Regex::new(r#"(?is)<(a|span|small|em|strong|i|b|p|div|sup|sub|li|section|aside|h[1-6]|td|th|caption)\b((?:[^"'<>]|"[^"]*"|'[^']*')*?)/\s*>"#).expect("empty XHTML pattern"));
+    let protected = PROTECTED.get_or_init(|| {
+        Regex::new(r"(?is)<!--.*?-->|<script\b[^>]*>.*?</script\s*>|<style\b[^>]*>.*?</style\s*>")
+            .expect("protected HTML pattern")
+    });
+    let mut expanded = String::new();
+    let mut end = 0;
+    for block in protected.find_iter(html) {
+        expanded.push_str(&pattern.replace_all(&html[end..block.start()], "<$1$2></$1>"));
+        expanded.push_str(block.as_str());
+        end = block.end();
+    }
+    expanded.push_str(&pattern.replace_all(&html[end..], "<$1$2></$1>"));
+    kuchiki::parse_html().one(expanded)
+}
 
 pub fn serialize(doc: &NodeRef) -> Vec<u8> {
     let mut output = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -74,7 +99,26 @@ fn write_node(node: &NodeRef, output: &mut String, parent_namespace: &str) {
                         .expect("string write");
                 }
             }
-            if node.first_child().is_none() {
+            if node.first_child().is_none()
+                && (namespace != "http://www.w3.org/1999/xhtml"
+                    || matches!(
+                        name,
+                        "area"
+                            | "base"
+                            | "br"
+                            | "col"
+                            | "embed"
+                            | "hr"
+                            | "img"
+                            | "input"
+                            | "link"
+                            | "meta"
+                            | "param"
+                            | "source"
+                            | "track"
+                            | "wbr"
+                    ))
+            {
                 output.push_str(" />");
             } else {
                 output.push('>');
@@ -100,5 +144,20 @@ fn write_node(node: &NodeRef, output: &mut String, parent_namespace: &str) {
                 write_node(&child, output, parent_namespace);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn empty_xhtml_expansion_preserves_script_strings_and_comments() {
+        let doc = super::parse(
+            "<p>Hello<a id='page'/> world</p><script>const tag = '<a/>';</script><!--<a/>-->",
+        );
+        assert_eq!(
+            doc.select_first("script").unwrap().text_contents(),
+            "const tag = '<a/>';"
+        );
+        assert_eq!(doc.select_first("#page").unwrap().text_contents(), "");
     }
 }

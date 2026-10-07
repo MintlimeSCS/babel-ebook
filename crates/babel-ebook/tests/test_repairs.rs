@@ -516,7 +516,7 @@ async fn empty_page_anchors_are_single_opaque_markers() {
     );
     let requests = translator.requests.lock().unwrap();
     assert!(!requests[0].0.contains(":OPEN"));
-    assert_eq!(requests[0].0.matches(":KEEP").count(), 2);
+    assert!(!requests[0].0.contains("[[BABEL:"));
     assert!(requests.iter().all(|r| !r.0.contains("SECRET")));
 }
 
@@ -562,7 +562,7 @@ async fn cancellation_interrupts_an_in_flight_translation() {
 }
 
 #[tokio::test]
-async fn many_marker_failures_add_at_most_one_request_per_chapter() {
+async fn all_providers_keep_markers_local_without_paid_repair() {
     #[derive(Default)]
     struct CostTracker {
         calls: Mutex<Vec<String>>,
@@ -614,10 +614,10 @@ async fn many_marker_failures_add_at_most_one_request_per_chapter() {
         let base = if refine { 80 } else { 40 };
         assert_eq!(
             calls.len(),
-            base + 1,
+            base,
             "no per-run calls or repeated marker attempts"
         );
-        assert_eq!(calls.iter().filter(|s| s.contains("[[BABEL:")).count(), 1);
+        assert_eq!(calls.iter().filter(|s| s.contains("[[BABEL:")).count(), 0);
     }
 }
 
@@ -656,6 +656,10 @@ impl Translator for StrictFragments {
         count: usize,
     ) -> Result<String, BabelEbookError> {
         self.calls.lock().unwrap().push(text.into());
+        if !self.enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            assert!(context.system_prompt.contains("JSON array"));
+            return Ok(text.to_string());
+        }
         assert!(context.system_prompt.contains("JSON object"));
         assert!(!text.contains("[[BABEL:"));
         if let Some(reply) = self.reply {
@@ -859,4 +863,30 @@ async fn strict_schema_overhead_is_included_in_input_budget_before_sending() {
     .unwrap_err();
     assert!(err.to_string().contains("input-token budget"), "{err}");
     assert!(model.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn self_closing_xhtml_page_anchor_does_not_duplicate_across_paragraphs() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = TranslationCache::new(dir.path().into());
+    let config = Config {
+        output_mode: OutputMode::Interleaved,
+        ..Config::default()
+    };
+    let output = process_document(
+        b"<p>Hello<a id='page-1'/> world</p><p>Hello again</p>",
+        &RecordingTranslator::default(),
+        &config.translation_options(),
+        &cache,
+        0,
+        "ch1",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let html = String::from_utf8(output).unwrap();
+    assert!(html.contains("<a id=\"page-1\"></a>"));
+    let parsed = kuchiki::parse_html().one(html);
+    assert_eq!(parsed.select("#page-1").unwrap().count(), 1);
 }
