@@ -1,4 +1,4 @@
-name: Build Windows installer
+name: Build Windows installer R01
 
 on:
   workflow_dispatch:
@@ -42,7 +42,7 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: BabelEbook-Windows-Format-Rate-Fix
+          name: BabelEbook-Windows-R01
           path: target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
           retention-days: 14
