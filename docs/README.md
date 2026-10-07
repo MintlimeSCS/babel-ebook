@@ -1,3 +1,26 @@
+# Custom program revision R02
+
+Work item V00002; prompt V2.6 remains a separate version.
+
+OpenAI-compatible responses ending with `finish_reason=length` are discarded.
+The affected source chunk is retried in smaller pieces with the same configured
+output-token limit. Recovery is bounded by three split levels and nine logical
+translation attempts (provider HTTP retries remain bounded separately). Markers
+and UTF-8 characters stay intact; every recovered piece and the final combined
+paragraph are validated before caching. Successful pieces from incomplete
+recovery have their own cache scope. Other response/format errors fail normally.
+
+Chapter completion and failure logs now appear immediately on arrival; the
+output chapters retain spine order. Checkpoint saves are serialized. Requests
+can overlap up to configured chapter concurrency, subject to advertised API
+limits and shared 429 waits. Already in-flight requests cannot be unsent.
+
+Keep the same original EPUB, provider/model, prompts, token settings, output
+mode and other translation settings when resuming R01. Compatible successful
+v2 caches and checkpoints remain reusable; no manual deletion is needed.
+A terminal truncation error includes the chapter, selected element and token
+usage reported by the provider (missing usage is shown as `null`).
+
 # Custom program revision R01
 
 This custom source revision belongs to work item V00002. Prompt V2.6 remains a separate version.
@@ -22,14 +45,14 @@ Any failed chapter saves a best-effort EPUB and resumable checkpoints but return
 > 自訂提示詞、章節提示詞與潤稿都會套用。詞彙表會隨設定保存、匯出及匯入，
 > 換書時請更新或清空。未填完整的項目不會送出。
 > EPUB 章節以 XHTML 輸出，保留斜體、連結與換行；雙語表格保留原欄數，
-> 表格標題會翻譯，純數字儲存格保持原樣。空白頁碼錨點由程式保留；模型若改動
-> 格式標記，程式把同段文字片段合併到一次結構化翻譯請求，再組回原有格式。
-> 每章至多增加一次格式修復請求；第一次標記失敗後，該章後續有格式的段落
-> 直接使用單次結構化請求。修復仍失敗就回報，避免反覆呼叫。輸出 token 上限
-> 不自動提高；仍可能有少量 JSON 格式成本，且模型的跨片段語句流暢度需實測。
+> 表格標題會翻譯，純數字儲存格保持原樣；空白頁碼錨點保持可連結。
+> 格式與連結由程式保留，模型只收到有意義的文字片段。多片段合併為單次
+> 結構化請求，回應必須保留片段數且不得空白。輸出明確遭截斷時，R02 會
+> 優先在句界／空白處縮小片段重試，最多三層拆分、九次翻譯嘗試；
+> 格式錯誤不反覆修復，輸出 token 上限不自動提高。
 > 官方 OpenAI 端點的 GPT-5.4／mini／nano 改為直接使用嚴格 JSON Schema：
 > 片段數固定且不可空白，不先送可能失敗的標記請求，不逐片段呼叫。
-> Schema 成本計入輸入與限流預算，token 上限和重試次數不增加。
+> Schema 成本計入輸入與限流預算；輸出上限不增加，截斷重試依上述 R02 上限執行。
 > 本次更新沿用 v2 快取與續譯設定識別，設定相同時不重譯已完成內容。
 > 數字章號搭配日期的閱讀器目錄，重用正文標題並保留章號，避免把章號誤當日期，
 > 也省下另一次目錄標題翻譯請求。

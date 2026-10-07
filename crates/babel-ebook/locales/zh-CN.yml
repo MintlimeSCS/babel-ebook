@@ -3,7 +3,7 @@ err_provider_not_found: 不支持的供应商 "%{provider}"
 err_api_key_missing: 未设置供应商 "%{provider}" 的 API Key
 btn_translate: 开始翻译
 log_translation_complete: 翻译完成
-err_api: "API 请求在重试后失败: %{msg}"
+err_api: "API 请求或响应失败: %{msg}"
 err_configuration: "配置错误: %{msg}"
 log_estimated_tokens: "预估源文本 token: %{total}（%{count} 个文档）"
 log_document_translated: "文档 %{href} 已翻译"

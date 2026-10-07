@@ -92,7 +92,7 @@ export function useLogState(): UseLogStateReturn {
           setLogState((prev) => {
             const message = t("log_chapter_finished", {
               href: payload.href,
-              current: prev.completed,
+              current: prev.completed + 1,
               total: prev.total,
             });
             return {

@@ -124,8 +124,12 @@ pub enum BabelEbookError {
     /// Translation was cancelled by the caller.
     Cancelled,
 
-    /// An API request failed after exhausting retries.
+    /// An API request or its response failed.
     ApiError(String),
+
+    /// A provider explicitly reported an incomplete response at its output limit.
+    /// The partial text is discarded; callers may retry smaller source pieces.
+    OutputTruncated(String),
 
     /// The requested translation provider is not supported.
     ProviderNotFound(String),
@@ -142,6 +146,7 @@ impl std::fmt::Display for BabelEbookError {
         match self {
             Self::Cancelled => write!(f, "translation cancelled"),
             Self::ApiError(msg) => write!(f, "{}", t!("err_api", msg = msg.as_str())),
+            Self::OutputTruncated(msg) => write!(f, "{msg}"),
             Self::ProviderNotFound(provider) => {
                 write!(
                     f,

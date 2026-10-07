@@ -383,6 +383,113 @@ async fn resume_skips_completed_chapters() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn partial_failure_events_checkpoints_and_output_agree_at_concurrency_three() {
+    struct PartialFailureTranslator;
+    #[async_trait]
+    impl Translator for PartialFailureTranslator {
+        fn name(&self) -> String {
+            "r02-partial-failure".into()
+        }
+        fn max_output_tokens(&self) -> usize {
+            3000
+        }
+        async fn translate(
+            &self,
+            text: &str,
+            _: &TranslateContext<'_>,
+        ) -> Result<String, babel_ebook::BabelEbookError> {
+            if text == "charlie" {
+                return Err(babel_ebook::BabelEbookError::ApiError(
+                    "mock HTTP 400: rejected chapter".into(),
+                ));
+            }
+            Ok(format!("[ZH] {text}"))
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let source = create_epub(
+        dir.path(),
+        &[
+            ("alpha.xhtml".into(), None, "<p>alpha</p>".into()),
+            ("bravo.xhtml".into(), None, "<p>bravo</p>".into()),
+            ("charlie.xhtml".into(), None, "<p>charlie</p>".into()),
+        ],
+    );
+    let output = dir.path().join("partial.epub");
+    let mut config = test_config(
+        source.clone(),
+        output.clone(),
+        dir.path().join("cache"),
+        dir.path().join("checkpoints"),
+    );
+    config.concurrency = 3;
+    config.output_mode = babel_ebook::config::OutputMode::TranslationOnly;
+    config.translation_scope.toc = false;
+    let callback = RecordingCallback::default();
+    let error = translate_epub(&config, &PartialFailureTranslator, None, Some(&callback))
+        .await
+        .expect_err("partial output must report one failed chapter");
+    assert!(error.to_string().contains("1 of 3 chapters failed"));
+    assert!(error.to_string().contains("charlie.xhtml"));
+    let events = callback.events.into_inner().unwrap();
+    assert!(matches!(
+        events.first(),
+        Some(ProgressEvent::Started { total: 3 })
+    ));
+    let completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProgressEvent::ChapterFinished { href, .. } => Some(href),
+            _ => None,
+        })
+        .collect();
+    let failures: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProgressEvent::Failed { href, error, .. } => Some((href, error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completed.len(), 2);
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].0.contains("charlie.xhtml"));
+    assert!(failures[0].1.contains("mock HTTP 400: rejected chapter"));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ProgressEvent::Completed)));
+    let store = CheckpointStore::new(config.checkpoint_dir.clone()).unwrap();
+    let checkpoint = store.load(&find_job_id(&config.checkpoint_dir)).unwrap();
+    let original = babel_ebook::read_epub(&source).unwrap();
+    let translated = babel_ebook::read_epub(&output).unwrap();
+    assert_eq!(checkpoint.chapters.len(), completed.len() + failures.len());
+    for entry in &checkpoint.chapters {
+        let chapter = translated
+            .chapters
+            .iter()
+            .find(|c| c.href == entry.href)
+            .unwrap();
+        if entry.status == ChapterStatus::Completed {
+            assert!(completed.contains(&&entry.href));
+            assert_eq!(entry.content.as_deref(), Some(chapter.content.as_slice()));
+            assert!(String::from_utf8_lossy(&chapter.content).contains("[ZH]"));
+            assert!(entry.error.is_none());
+        } else {
+            assert_eq!(entry.status, ChapterStatus::Failed);
+            assert_eq!(entry.href, *failures[0].0);
+            assert_eq!(entry.error.as_deref(), Some(failures[0].1.as_str()));
+            assert!(entry.content.is_none());
+            let original = original
+                .chapters
+                .iter()
+                .find(|c| c.href == entry.href)
+                .unwrap();
+            assert_eq!(chapter.content, original.content);
+        }
+    }
+}
+
+#[tokio::test]
 async fn srt_input_translates_to_epub() {
     let temp_dir = TempDir::new().expect("create temp dir");
     let source = temp_dir.path().join("subtitles.srt");
@@ -520,7 +627,7 @@ async fn docx_input_translates_to_epub() {
 }
 
 #[tokio::test]
-async fn ordered_pipeline_emits_events_in_order() {
+async fn pipeline_finishes_all_chapters_and_preserves_spine_order() {
     let temp_dir = TempDir::new().expect("create temp dir");
     let source = create_epub(
         temp_dir.path(),
@@ -547,18 +654,33 @@ async fn ordered_pipeline_emits_events_in_order() {
         .expect("translation should succeed");
 
     let events: Vec<ProgressEvent> = callback.events.into_inner().expect("progress lock");
-    let finished_indices: Vec<usize> = events
+    let mut finished_indices: Vec<usize> = events
         .iter()
         .filter_map(|e| match e {
             ProgressEvent::ChapterFinished { index, .. } => Some(*index),
             _ => None,
         })
         .collect();
+    finished_indices.sort_unstable();
     assert_eq!(
         finished_indices,
         vec![0, 1, 2],
-        "chapter finished events should follow spine order: {:?}",
+        "every chapter should finish exactly once: {:?}",
         events
+    );
+    let book = babel_ebook::read_epub(&config.output).unwrap();
+    let hrefs: Vec<_> = book
+        .chapters
+        .iter()
+        .map(|chapter| chapter.href.as_str())
+        .collect();
+    assert_eq!(
+        hrefs,
+        vec![
+            "/OEBPS/ch01.xhtml",
+            "/OEBPS/ch02.xhtml",
+            "/OEBPS/ch03.xhtml"
+        ]
     );
 }
 

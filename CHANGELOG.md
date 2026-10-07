@@ -1,3 +1,19 @@
+# Custom revision R02 — 2026-10-07
+
+- Retry explicitly truncated OpenAI-compatible responses with smaller source
+  pieces, keeping output limits and compatible v2 cache/checkpoint identities.
+  Recovery stops at three split levels or nine translation attempts per source
+  chunk. Partial model responses are discarded; validated subpieces are cached
+  separately, and the full paragraph is cached only after complete recovery.
+- Emit chapter completion/failure events as each result arrives while preserving
+  EPUB spine order. Serialize checkpoint writes to avoid concurrent snapshots.
+- Hold the shared request schedule lock only to reserve send slots and update
+  limits; release it during HTTP and waits. Keep advertised pacing and shared
+  429 pauses. Requests already in flight may finish during a new pause.
+- Include reported token usage and selected-element position in terminal
+  truncation errors; stop implying every API error exhausted retries.
+- Fix the completed-chapter log counter and identify builds as R02.
+
 # Custom revision R01 — work V00002 (2026-10-07)
 
 - Keep protected EPUB markers local for all providers; marked paragraphs use one text-fragment request without paid format-repair calls.

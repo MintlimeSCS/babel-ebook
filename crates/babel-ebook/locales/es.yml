@@ -3,7 +3,7 @@ err_provider_not_found: El proveedor "%{provider}" no es compatible
 err_api_key_missing: Falta la clave API para el proveedor "%{provider}"
 btn_translate: Traducir
 log_translation_complete: Traducción completada
-err_api: "Error en la solicitud API después de reintentos: %{msg}"
+err_api: "Error en la solicitud o respuesta API: %{msg}"
 err_configuration: "Error de configuración: %{msg}"
 log_estimated_tokens: "Tokens de origen estimados: %{total} (%{count} documentos)"
 log_document_translated: "Documento %{href} traducido"

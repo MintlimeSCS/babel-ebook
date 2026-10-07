@@ -100,7 +100,7 @@ pub async fn process_document(
         .or(cancellation);
 
     let formatting = translation::FormattingState::default();
-    for element in elements {
+    for (element_index, element) in elements.into_iter().enumerate() {
         let node = element.as_node();
         if skip_set.contains(&node_ptr(node)) || is_inside_excluded_subtree(node, &skip_set) {
             continue;
@@ -122,7 +122,20 @@ pub async fn process_document(
             chapter_cancellation,
             &formatting,
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            BabelEbookError::OutputTruncated(message) => BabelEbookError::OutputTruncated(format!(
+                "{message}; selected element {} <{}>{}",
+                element_index + 1,
+                element.name.local,
+                element
+                    .attributes
+                    .borrow()
+                    .get("id")
+                    .map_or_else(String::new, |id| format!(" id={id}"))
+            )),
+            other => other,
+        })?;
     }
 
     Ok(xhtml::serialize(&doc))

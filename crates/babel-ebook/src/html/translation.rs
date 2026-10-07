@@ -194,6 +194,162 @@ async fn translate_structured(
     Ok(output)
 }
 
+const MAX_SPLIT_DEPTH: usize = 3;
+const MAX_RECOVERY_REQUESTS: usize = 9;
+const MIN_SPLIT_TOKENS: usize = 32;
+
+/// Choose an exact UTF-8 boundary near the middle, preferring sentence ends
+/// and then whitespace.
+/// Neither a protected marker nor a character may be cut in half. Both sides
+/// must contain translatable text; their concatenation is exactly the source.
+fn recovery_split(source: &str) -> Option<(String, String)> {
+    if count_tokens(source) < MIN_SPLIT_TOKENS {
+        return None;
+    }
+    let markers: Vec<_> = marker_regex().find_iter(source).collect();
+    let middle = source.len() / 2;
+    let valid = |position: usize| {
+        position > 0
+            && position < source.len()
+            && position >= source.len() / 4
+            && position <= source.len() * 3 / 4
+            && !markers
+                .iter()
+                .any(|m| m.start() < position && position < m.end())
+            && marker_regex()
+                .replace_all(&source[..position], "")
+                .chars()
+                .any(char::is_alphabetic)
+            && marker_regex()
+                .replace_all(&source[position..], "")
+                .chars()
+                .any(char::is_alphabetic)
+    };
+    let candidates: Vec<_> = source
+        .char_indices()
+        .filter(|(position, _)| valid(*position))
+        .collect();
+    let position = candidates
+        .iter()
+        .filter(|(position, character)| {
+            character.is_whitespace()
+                && source[..*position]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| matches!(c, '.' | '!' | '?' | '。' | '！' | '？'))
+        })
+        .min_by_key(|(position, _)| position.abs_diff(middle))
+        .or_else(|| {
+            candidates
+                .iter()
+                .filter(|(_, character)| character.is_whitespace())
+                .min_by_key(|(position, _)| position.abs_diff(middle))
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .min_by_key(|(position, _)| position.abs_diff(middle))
+        })?
+        .0;
+    Some((source[..position].into(), source[position..].into()))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn translate_with_recovery(
+    source: &str,
+    translator: &dyn Translator,
+    context: &TranslateContext<'_>,
+    max_input_tokens: usize,
+    cancellation: Option<&CancellationToken>,
+    formatting: &FormattingState,
+    cache: &TranslationCache,
+    scope: &str,
+) -> Result<String, BabelEbookError> {
+    let mut last_truncation = match translate_guarded(
+        source,
+        translator,
+        context,
+        max_input_tokens,
+        cancellation,
+        formatting,
+    )
+    .await
+    {
+        Ok(output) => return Ok(output),
+        Err(BabelEbookError::OutputTruncated(message)) => message,
+        Err(error) => return Err(error),
+    };
+    let Some((left, right)) = recovery_split(source) else {
+        return Err(BabelEbookError::OutputTruncated(format!(
+            "{last_truncation}; source is too small to split safely"
+        )));
+    };
+    let recovery_scope = format!("{scope}-adaptive-v1");
+    let mut pending = vec![(right, 1), (left, 1)];
+    let mut output = String::new();
+    let mut requests = 1;
+    while let Some((piece, depth)) = pending.pop() {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(BabelEbookError::Cancelled);
+        }
+        let translated = if let Some(cached) = valid_cached(cache, &recovery_scope, &piece).await {
+            cached
+        } else {
+            if requests >= MAX_RECOVERY_REQUESTS {
+                return Err(BabelEbookError::OutputTruncated(format!(
+                    "{last_truncation}; stopped after {requests} translation attempts (limit {MAX_RECOVERY_REQUESTS})"
+                )));
+            }
+            requests += 1;
+            tracing::warn!(attempt = requests, depth, source_tokens = count_tokens(&piece),
+                "Retrying a truncated translation with a smaller source piece; output limit unchanged");
+            match translate_guarded(
+                &piece,
+                translator,
+                context,
+                max_input_tokens,
+                cancellation,
+                formatting,
+            )
+            .await
+            {
+                Ok(translated) => {
+                    validate_markers(&piece, &translated)?;
+                    // Subpieces use a separate scope. A partially recovered
+                    // paragraph never becomes a successful full-paragraph entry.
+                    cache
+                        .put_async(&recovery_scope, &piece, &translated, None)
+                        .await;
+                    translated
+                }
+                Err(BabelEbookError::OutputTruncated(message)) => {
+                    last_truncation = message;
+                    if depth < MAX_SPLIT_DEPTH {
+                        if let Some((left, right)) = recovery_split(&piece) {
+                            pending.push((right, depth + 1));
+                            pending.push((left, depth + 1));
+                            continue;
+                        }
+                    }
+                    return Err(BabelEbookError::OutputTruncated(format!(
+                        "{last_truncation}; smaller-piece recovery stopped at depth {depth} after {requests} attempts"
+                    )));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        // Restore source boundary whitespace instead of inserting spaces at
+        // arbitrary character splits (important for Chinese and inline links).
+        let start = piece.len() - piece.trim_start().len();
+        let end = piece.trim_end().len();
+        output.push_str(&piece[..start]);
+        output.push_str(translated.trim());
+        output.push_str(&piece[end..]);
+    }
+    validate_markers(source, &output)?;
+    Ok(output)
+}
+
 async fn valid_cached(cache: &TranslationCache, scope: &str, source: &str) -> Option<String> {
     let cached = cache.get_async(scope, source).await?;
     if cached.trim().is_empty() || validate_markers(source, &cached).is_err() {
@@ -356,15 +512,26 @@ pub(super) async fn translate_text_with_state(
                 system_prompt: &system_prompt,
                 target_lang,
             };
-            let result = translate_guarded(
+            let result = translate_with_recovery(
                 chunk,
                 translator,
                 &context,
                 options.max_input_tokens,
                 cancellation,
                 formatting,
+                cache,
+                &translate_name,
             )
-            .await?;
+            .await
+            .map_err(|error| match error {
+                BabelEbookError::OutputTruncated(message) => {
+                    BabelEbookError::OutputTruncated(format!(
+                        "{chapter_href}, source chunk {} of {chunk_total}: {message}",
+                        chunk_index + 1
+                    ))
+                }
+                other => other,
+            })?;
             validate_markers(chunk, &result)?;
             let tokens = count_tokens(chunk) + count_tokens(&result);
             cache
@@ -415,13 +582,15 @@ pub(super) async fn translate_text_with_state(
             system_prompt: &refine_prompt,
             target_lang,
         };
-        let result = translate_guarded(
+        let result = translate_with_recovery(
             chunk,
             translator,
             &context,
             options.max_input_tokens,
             cancellation,
             formatting,
+            cache,
+            &refine_name,
         )
         .await?;
         validate_markers(chunk, &result)?;

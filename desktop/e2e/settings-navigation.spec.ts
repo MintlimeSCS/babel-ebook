@@ -93,6 +93,30 @@ test("loads persisted checkpoints and allows selecting a resume record", async (
   await browser.close();
 });
 
+test("shows completed count and an early failure while another chapter is still running", async () => {
+  const browser = await chromium.connectOverCDP(cdpUrl);
+  const page = browser.contexts()[0].pages()[0];
+  await page.getByTestId("nav-logs").click();
+  // Use the actual Tauri event channel, without a translator or paid API call.
+  await page.evaluate(async () => {
+    const runtime = (window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    for (const payload of [
+      { Started: { total: 3 } },
+      { ChapterStarted: { index: 0, href: "r02-slow.xhtml" } },
+      { ChapterFinished: { index: 1, href: "r02-fast.xhtml" } },
+      { Failed: { index: 2, href: "r02-failed.xhtml", error: "r02 offline fixture failure" } },
+    ]) {
+      await runtime.invoke("plugin:event|emit", { event: "translation_progress", payload });
+    }
+  });
+  await expect(page.locator(".log-entry").filter({ hasText: "Finished: r02-fast.xhtml (1/3)" })).toBeVisible();
+  await expect(page.locator(".log-entry.error").filter({ hasText: "r02 offline fixture failure" })).toBeVisible();
+  await expect(page.locator(".log-entry").filter({ hasText: "Finished: r02-slow.xhtml" })).toHaveCount(0);
+  await browser.close();
+});
+
 test("navigates through all settings tabs and persists changes", async () => {
   test.setTimeout(120000);
   const browser = await chromium.connectOverCDP(cdpUrl);
@@ -168,6 +192,6 @@ test("About shows the custom program revision", async () => {
   const browser = await chromium.connectOverCDP(cdpUrl);
   const page = browser.contexts()[0].pages()[0];
   await page.getByRole("button", { name: "About", exact: true }).click();
-  await expect(page.locator(".about-page")).toContainText("R01");
+  await expect(page.locator(".about-page")).toContainText("R02");
   await browser.close();
 });

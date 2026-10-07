@@ -94,9 +94,6 @@ pub async fn run_ordered_pipeline(
         let chapter_content = book.chapters[index].content.clone();
         let options = context.config.translation_options();
         let semaphore = Arc::clone(&semaphore);
-        let checkpoint = Arc::clone(&checkpoint);
-        let store = checkpoint_store.cloned();
-        let job_id = job_id.clone();
         futures.push(async move {
             let result = match acquire_permit(semaphore).await {
                 Ok(permit) => {
@@ -131,25 +128,21 @@ pub async fn run_ordered_pipeline(
                 Err(err) => Err(err),
             };
 
-            update_checkpoint_entry(&checkpoint, index, &result, store.as_ref(), &job_id).await;
-
             Ok::<(usize, Result<Vec<u8>, BabelEbookError>), BabelEbookError>((index, result))
         });
     }
 
-    let mut results = Vec::with_capacity(pending_indices.len());
+    let mut failures = Vec::new();
     while let Some(item) = futures.next().await {
         let (index, result) = item?;
+        // Persist one completed result at a time. Concurrent snapshots must not
+        // overwrite newer checkpoints or race on the store's temporary file.
+        update_checkpoint_entry(&checkpoint, index, &result, checkpoint_store, &job_id).await;
         if matches!(result, Err(BabelEbookError::Cancelled)) {
             return Err(BabelEbookError::Cancelled);
         }
-        results.push((index, result));
-        ensure_not_cancelled(context.cancellation)?;
-    }
-    results.sort_by_key(|(index, _)| *index);
-
-    let mut failures = Vec::new();
-    for (index, result) in results {
+        // Emit events on arrival, even when an earlier chapter is still running.
+        // Assigning by spine index preserves book order independently of events.
         match result {
             Ok(chapter_content) => {
                 book.chapters[index].content = chapter_content;
@@ -171,10 +164,12 @@ pub async fn run_ordered_pipeline(
                         error: err.to_string(),
                     },
                 );
-                failures.push((href, err));
+                failures.push((index, href, err));
             }
         }
+        ensure_not_cancelled(context.cancellation)?;
     }
+    failures.sort_by_key(|(index, _, _)| *index);
 
     if let Some(store) = checkpoint_store {
         let cp_to_save = {
@@ -187,7 +182,10 @@ pub async fn run_ordered_pipeline(
     }
 
     Ok(PipelineResult {
-        failures,
+        failures: failures
+            .into_iter()
+            .map(|(_, href, err)| (href, err))
+            .collect(),
         chapters: book.chapters.clone(),
     })
 }
@@ -458,6 +456,211 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn fast_completion_and_failure_are_visible_before_slow_chapter_finishes() {
+        struct GatedTranslator(Arc<tokio::sync::Notify>);
+        #[async_trait]
+        impl Translator for GatedTranslator {
+            fn name(&self) -> String {
+                "r02-gated".into()
+            }
+            fn max_output_tokens(&self) -> usize {
+                3000
+            }
+            async fn translate(
+                &self,
+                text: &str,
+                _: &TranslateContext<'_>,
+            ) -> Result<String, BabelEbookError> {
+                if text == "alpha" {
+                    self.0.notified().await;
+                }
+                if text == "charlie" {
+                    return Err(BabelEbookError::ApiError("mock failure".into()));
+                }
+                Ok(format!("[{text}]"))
+            }
+        }
+        struct LiveCallback {
+            release: Arc<tokio::sync::Notify>,
+            terminals: AtomicUsize,
+            events: std::sync::Mutex<Vec<ProgressEvent>>,
+        }
+        impl ProgressCallback for LiveCallback {
+            fn on_progress(&self, event: ProgressEvent) {
+                let fast = matches!(
+                    event,
+                    ProgressEvent::ChapterFinished { index: 1, .. }
+                        | ProgressEvent::Failed { index: 2, .. }
+                );
+                self.events.lock().unwrap().push(event);
+                if fast && self.terminals.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                    self.release.notify_one();
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.concurrency = 3;
+        let cache = TranslationCache::new(dir.path().join("cache"));
+        let store = CheckpointStore::new(dir.path().join("checkpoints")).unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let translator = GatedTranslator(release.clone());
+        let callback = LiveCallback {
+            release,
+            terminals: AtomicUsize::new(0),
+            events: std::sync::Mutex::new(Vec::new()),
+        };
+        let context = PipelineContext {
+            translator: &translator,
+            config: &config,
+            cache: &cache,
+            progress: Some(&callback),
+            cancellation: None,
+        };
+        let mut book = make_book(vec!["alpha", "bravo", "charlie"]);
+        let failed_original = book.chapters[2].content.clone();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_ordered_pipeline(
+                &mut book,
+                vec![0, 1, 2],
+                &context,
+                Some(&store),
+                Some("live"),
+                "hash",
+            ),
+        )
+        .await
+        .expect("terminal events must release the slow chapter before all futures end")
+        .unwrap();
+        assert_eq!(result.failures.len(), 1);
+        let events = callback.events.into_inner().unwrap();
+        let slow_end = events
+            .iter()
+            .position(|e| matches!(e, ProgressEvent::ChapterFinished { index: 0, .. }))
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .position(|e| matches!(e, ProgressEvent::ChapterFinished { index: 1, .. }))
+                .unwrap()
+                < slow_end
+        );
+        assert!(
+            events
+                .iter()
+                .position(|e| matches!(e, ProgressEvent::Failed { index: 2, .. }))
+                .unwrap()
+                < slow_end
+        );
+        assert!(String::from_utf8_lossy(&book.chapters[0].content).contains("[alpha]"));
+        assert!(String::from_utf8_lossy(&book.chapters[1].content).contains("[bravo]"));
+        assert_eq!(book.chapters[2].content, failed_original);
+        let checkpoint = store.load("live").unwrap();
+        assert_eq!(
+            checkpoint
+                .chapters
+                .iter()
+                .filter(|c| c.status == ChapterStatus::Completed)
+                .count(),
+            2
+        );
+        assert_eq!(checkpoint.chapters[2].status, ChapterStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn r01_resume_reuses_twenty_seven_completed_chapters_and_only_requests_failed_one() {
+        struct ResumeTranslator(AtomicUsize);
+        #[async_trait]
+        impl Translator for ResumeTranslator {
+            fn name(&self) -> String {
+                "r02-resume".into()
+            }
+            fn max_output_tokens(&self) -> usize {
+                3000
+            }
+            async fn translate(
+                &self,
+                text: &str,
+                _: &TranslateContext<'_>,
+            ) -> Result<String, BabelEbookError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(format!("[{text}]"))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(dir.path().join("checkpoints")).unwrap();
+        let config = make_config();
+        let mut book = make_book(vec!["remaining chapter"; 28]);
+        let signature = CheckpointStore::translation_signature(&config);
+        let chapters: Vec<_> = (0..28)
+            .map(|index| ChapterCheckpoint {
+                index,
+                href: book.chapters[index].href.clone(),
+                status: if index == 15 {
+                    ChapterStatus::Failed
+                } else {
+                    ChapterStatus::Completed
+                },
+                content: if index == 15 {
+                    None
+                } else {
+                    Some(format!("<p>R01 completed {index}</p>").into_bytes())
+                },
+                error: if index == 15 {
+                    Some("old truncation".into())
+                } else {
+                    None
+                },
+            })
+            .collect();
+        let original = chapters.clone();
+        store
+            .save(&Checkpoint {
+                job_id: "resume-27".into(),
+                source_hash: "hash".into(),
+                translation_signature: signature.clone(),
+                source_path: String::new(),
+                chapters,
+            })
+            .unwrap();
+        let translator = ResumeTranslator(AtomicUsize::new(0));
+        let cache = TranslationCache::new(dir.path().join("cache"));
+        let context = PipelineContext {
+            translator: &translator,
+            config: &config,
+            cache: &cache,
+            progress: None,
+            cancellation: None,
+        };
+        let result = run_ordered_pipeline(
+            &mut book,
+            (0..28).collect(),
+            &context,
+            Some(&store),
+            Some("resume-27"),
+            "hash",
+        )
+        .await
+        .unwrap();
+        assert!(result.failures.is_empty());
+        assert_eq!(translator.0.load(Ordering::SeqCst), 1);
+        for entry in original.iter().filter(|entry| entry.index != 15) {
+            assert_eq!(
+                book.chapters[entry.index].content,
+                *entry.content.as_ref().unwrap()
+            );
+        }
+        let checkpoint = store.load("resume-27").unwrap();
+        assert_eq!(checkpoint.translation_signature, signature);
+        assert!(checkpoint
+            .chapters
+            .iter()
+            .all(|entry| entry.status == ChapterStatus::Completed));
+    }
+
+    #[tokio::test]
     async fn pipeline_skips_completed_chapters() {
         let dir = tempfile::tempdir().unwrap();
         let store = CheckpointStore::new(dir.path().to_path_buf()).unwrap();
@@ -587,6 +790,72 @@ mod tests {
             });
         });
         handle.join().expect("test thread panicked");
+    }
+
+    #[tokio::test]
+    async fn concurrency_three_runs_three_requests_and_never_exceeds_the_limit() {
+        struct BarrierTranslator {
+            active: AtomicUsize,
+            max_active: AtomicUsize,
+            calls: AtomicUsize,
+            barrier: tokio::sync::Barrier,
+        }
+        #[async_trait]
+        impl Translator for BarrierTranslator {
+            fn name(&self) -> String {
+                "r02-concurrency-three".into()
+            }
+            fn max_output_tokens(&self) -> usize {
+                3000
+            }
+            async fn translate(
+                &self,
+                text: &str,
+                _: &TranslateContext<'_>,
+            ) -> Result<String, BabelEbookError> {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_active.fetch_max(active, Ordering::SeqCst);
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                // Each batch can finish only after three requests have entered.
+                // Sequential scheduling therefore times out rather than passing.
+                self.barrier.wait().await;
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                Ok(format!("[{text}]"))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.concurrency = 3;
+        let translator = BarrierTranslator {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            barrier: tokio::sync::Barrier::new(3),
+        };
+        let cache = TranslationCache::new(dir.path().join("cache"));
+        let context = PipelineContext {
+            translator: &translator,
+            config: &config,
+            cache: &cache,
+            progress: None,
+            cancellation: None,
+        };
+        let texts = vec!["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+        let mut book = make_book(texts.clone());
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_ordered_pipeline(&mut book, (0..6).collect(), &context, None, None, ""),
+        )
+        .await
+        .expect("three concurrent requests must reach the barrier in both batches")
+        .unwrap();
+        assert!(result.failures.is_empty());
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 6);
+        assert_eq!(translator.max_active.load(Ordering::SeqCst), 3);
+        assert_eq!(translator.active.load(Ordering::SeqCst), 0);
+        for (chapter, text) in book.chapters.iter().zip(texts) {
+            assert!(String::from_utf8_lossy(&chapter.content).contains(&format!("[{text}]")));
+        }
     }
 
     #[test]

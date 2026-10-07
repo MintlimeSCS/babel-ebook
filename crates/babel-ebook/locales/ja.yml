@@ -3,7 +3,7 @@ err_provider_not_found: プロバイダー「%{provider}」はサポートされ
 err_api_key_missing: プロバイダー「%{provider}」の API キーが設定されていません
 btn_translate: 翻訳
 log_translation_complete: 翻訳が完了しました
-err_api: "APIリクエストがリトライ後に失敗しました: %{msg}"
+err_api: "APIリクエストまたは応答に失敗しました: %{msg}"
 err_configuration: "設定エラー: %{msg}"
 log_estimated_tokens: "推定ソーストークン: %{total}（%{count} ドキュメント）"
 log_document_translated: "ドキュメント %{href} を翻訳しました"

@@ -141,7 +141,7 @@ pub async fn openai_compatible_translate(
     .await
 }
 
-#[allow(clippy::too_many_arguments, clippy::significant_drop_tightening)]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn openai_compatible_translate_with_format(
     client: &Client<OpenAIConfig>,
     model: &str,
@@ -160,24 +160,18 @@ pub(super) async fn openai_compatible_translate_with_format(
     if let Some(format) = response_format {
         request["response_format"] = format;
     }
-    // One gate per endpoint/model across chapters and jobs. Keeping the gate
-    // through retries prevents every concurrent chapter from hitting the same
-    // exhausted token bucket. No credentials are used as map keys or persisted.
+    // Reserve send slots under a short lock; never hold it during HTTP or sleep.
+    // Chapters share rate-limit delays while their in-flight requests can overlap.
+    // No credentials are used as map keys or persisted.
     let gate = request_gate(&client.config().url("/chat/completions"), model);
     let budget = crate::chunking::count_tokens(system_prompt)
         .saturating_add(crate::chunking::count_tokens(text))
         .saturating_add(format_tokens)
         .saturating_add(max_tokens as usize)
         .saturating_add(32);
-    let mut schedule = gate.lock().await;
     let http_client = build_reqwest_client();
     for attempt in 0..=RATE_LIMIT_RETRIES {
-        if schedule.next_send.saturating_duration_since(Instant::now()) > MAX_RATE_LIMIT_WAIT {
-            return Err(BabelEbookError::ApiError(format!(
-                "{provider_name} rate-limit wait exceeds five minutes; retry the job later"
-            )));
-        }
-        tokio::time::sleep_until(schedule.next_send).await;
+        reserve_request(&gate, budget, provider_name).await?;
         let response = http_client
             .post(client.config().url("/chat/completions"))
             .headers(client.config().headers())
@@ -191,13 +185,15 @@ pub(super) async fn openai_compatible_translate_with_format(
                 if attempt >= MAX_RETRIES {
                     return Err(BabelEbookError::ApiError(error.to_string()));
                 }
-                schedule.defer(Duration::from_secs(2_u64.pow(attempt)));
+                gate.lock()
+                    .await
+                    .defer(Duration::from_secs(2_u64.pow(attempt)));
                 continue;
             }
         };
         let status = response.status();
         let headers = response.headers().clone();
-        schedule.observe(&headers, budget);
+        gate.lock().await.observe(&headers, budget);
         let body = response.text().await.map_err(|error| {
             BabelEbookError::ApiError(format!("{provider_name} response read failed: {error}"))
         })?;
@@ -213,7 +209,7 @@ pub(super) async fn openai_compatible_translate_with_format(
             let delay = rate_limit_delay(&headers, &body, attempt);
             // Do not shorten a server-provided wait. Very long waits are returned
             // as errors so a job cannot appear frozen for hours.
-            schedule.defer(delay);
+            gate.lock().await.defer(delay);
             if attempt == RATE_LIMIT_RETRIES || delay > MAX_RATE_LIMIT_WAIT {
                 return Err(error);
             }
@@ -225,7 +221,9 @@ pub(super) async fn openai_compatible_translate_with_format(
         } else if (status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT)
             && attempt < MAX_RETRIES
         {
-            schedule.defer(Duration::from_secs(2_u64.pow(attempt)));
+            gate.lock()
+                .await
+                .defer(Duration::from_secs(2_u64.pow(attempt)));
         } else {
             // Authentication, unsupported parameters and other permanent 4xx
             // errors fail immediately, without SDK or outer retry multiplication.
@@ -242,6 +240,8 @@ type SharedSchedule = Arc<tokio::sync::Mutex<RequestSchedule>>;
 
 struct RequestSchedule {
     next_send: Instant,
+    token_interval: f64,
+    request_interval: f64,
 }
 
 impl RequestSchedule {
@@ -274,6 +274,12 @@ impl RequestSchedule {
             ),
         ] {
             if let Some(capacity) = header_number(headers, limit).filter(|v| *v > 0.0) {
+                let interval = (60.0 / capacity * 1.1).min(300.0);
+                if limit == "x-ratelimit-limit-requests" {
+                    self.request_interval = interval;
+                } else {
+                    self.token_interval = self.token_interval.max(interval);
+                }
                 self.defer(Duration::from_secs_f64(
                     (60.0 * needed / capacity * 1.1).min(300.0),
                 ));
@@ -284,6 +290,37 @@ impl RequestSchedule {
                 }
             }
         }
+    }
+}
+
+async fn reserve_request(
+    gate: &SharedSchedule,
+    budget: usize,
+    provider: &str,
+) -> Result<(), BabelEbookError> {
+    loop {
+        let next_send = {
+            let mut schedule = gate.lock().await;
+            let now = Instant::now();
+            let wait = schedule.next_send.saturating_duration_since(now);
+            if wait > MAX_RATE_LIMIT_WAIT {
+                return Err(BabelEbookError::ApiError(format!(
+                    "{provider} rate-limit wait exceeds five minutes; retry the job later"
+                )));
+            }
+            if wait.is_zero() {
+                let tokens = f64::from(u32::try_from(budget).unwrap_or(u32::MAX));
+                let spacing = (schedule.token_interval * tokens)
+                    .max(schedule.request_interval)
+                    .min(300.0);
+                schedule.next_send = now + Duration::from_secs_f64(spacing);
+                return Ok(());
+            }
+            schedule.next_send
+        };
+        tokio::time::sleep_until(next_send).await;
+        // Recheck after waking: another response may have extended a shared 429
+        // pause, or another caller may have reserved this slot first.
     }
 }
 
@@ -298,6 +335,8 @@ fn request_gate(endpoint: &str, model: &str) -> SharedSchedule {
         .or_insert_with(|| {
             Arc::new(tokio::sync::Mutex::new(RequestSchedule {
                 next_send: Instant::now(),
+                token_interval: 0.0,
+                request_interval: 0.0,
             }))
         })
         .clone()
@@ -410,8 +449,11 @@ fn extract_chat_content(body: &str, provider: &str) -> Result<String, BabelEbook
         )));
     }
     if choice["finish_reason"] == "length" {
-        return Err(BabelEbookError::ApiError(format!(
-            "{provider} output reached its token limit and was truncated; increase maximum output tokens or reduce chunk size. No truncated translation was cached."
+        let usage = &response["usage"];
+        return Err(BabelEbookError::OutputTruncated(format!(
+            "{provider} output reached its token limit and was truncated (prompt_tokens={}, completion_tokens={}, reasoning_tokens={}); no truncated translation was cached",
+            usage["prompt_tokens"], usage["completion_tokens"],
+            usage["completion_tokens_details"]["reasoning_tokens"]
         )));
     }
     let content = choice["message"]["content"]
@@ -703,14 +745,22 @@ mod tests {
         headers.insert("x-ratelimit-remaining-tokens", "100".parse().unwrap());
         headers.insert("x-ratelimit-reset-tokens", "2s".parse().unwrap());
         let start = Instant::now();
-        let mut schedule = RequestSchedule { next_send: start };
+        let mut schedule = RequestSchedule {
+            next_send: start,
+            token_interval: 0.0,
+            request_interval: 0.0,
+        };
         schedule.observe(&headers, 4000);
         assert_eq!(
             schedule.next_send.duration_since(start),
             Duration::from_millis(2250)
         );
         headers.insert("x-ratelimit-remaining-tokens", "10000".parse().unwrap());
-        let mut schedule = RequestSchedule { next_send: start };
+        let mut schedule = RequestSchedule {
+            next_send: start,
+            token_interval: 0.0,
+            request_interval: 0.0,
+        };
         schedule.observe(&headers, 4000);
         assert!(schedule.next_send.duration_since(start).as_secs_f64() >= 1.31);
     }
@@ -803,6 +853,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_provider_path_recovers_length_response_with_smaller_requests_and_same_limit() {
+        let truncated = r#"{"choices":[{"message":{"content":"DO NOT CACHE THIS"},"finish_reason":"length"}],"usage":{"prompt_tokens":450,"completion_tokens":3000,"completion_tokens_details":{"reasoning_tokens":0}}}"#;
+        let (url, calls, server) = mock_chat_server(vec![
+            (200, "", truncated.into()),
+            (200, "", successful_chat()),
+            (200, "", successful_chat()),
+        ])
+        .await;
+        let translator = super::super::openai::OpenAiTranslator::new(
+            "fake-key".into(),
+            Some("gpt-5.4-mini-2026-03-17".into()),
+            Some(url),
+            3000,
+            0.2,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cache = crate::cache::TranslationCache::new(dir.path().into());
+        let config = crate::config::Config {
+            max_input_tokens: 4000,
+            max_output_tokens: 3000,
+            temperature: 0.2,
+            system_prompt: Some("Translate only".into()),
+            ..crate::config::Config::default()
+        };
+        let text = "This sentence contains evidence and careful investigation. ".repeat(16);
+        let output = crate::html::translate_text(
+            &text,
+            &translator,
+            &config.translation_options(),
+            &cache,
+            15,
+            "Act-13.xhtml",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output, "你好 你好");
+        assert!(!output.contains("DO NOT CACHE"));
+        assert_eq!(
+            crate::html::translate_text(
+                &text,
+                &translator,
+                &config.translation_options(),
+                &cache,
+                15,
+                "Act-13.xhtml",
+                None,
+                None
+            )
+            .await
+            .unwrap(),
+            output
+        );
+        server.await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        let original_len = calls[0].1["messages"][1]["content"].as_str().unwrap().len();
+        for (_, request) in calls.iter() {
+            assert_eq!(request["max_completion_tokens"], 3000);
+            assert!(request.get("temperature").is_none());
+        }
+        assert!(calls[1..]
+            .iter()
+            .all(
+                |(_, request)| request["messages"][1]["content"].as_str().unwrap().len()
+                    < original_len
+            ));
+        drop(calls);
+        let error = extract_chat_content(truncated, "OpenAI").unwrap_err();
+        assert!(matches!(error, BabelEbookError::OutputTruncated(_)));
+        assert!(error.to_string().contains("completion_tokens=3000"));
+        assert!(!error.to_string().contains("after retries"));
+    }
+
+    #[tokio::test]
     async fn concurrent_chapters_share_429_wait_and_keep_gpt5_parameters() {
         let (url, calls, server) = mock_chat_server(vec![
             (429, "Retry-After: 0.1\r\n", r#"{"error":{"code":"rate_limit_exceeded","message":"Please try again in 100ms."}}"#.into()),
@@ -814,9 +940,11 @@ mod tests {
                 .with_api_key("fake-key")
                 .with_api_base(url),
         );
-        let make = || {
+        let gate = request_gate(&client.config().url("/chat/completions"), "gpt-5.4-mini");
+        let first_client = client.clone();
+        let first = tokio::spawn(async move {
             openai_compatible_translate(
-                &client,
+                &first_client,
                 "gpt-5.4-mini",
                 "Translate",
                 "Hello",
@@ -824,10 +952,32 @@ mod tests {
                 0.2,
                 "OpenAI",
             )
-        };
-        let (a, b) = tokio::join!(make(), make());
-        assert_eq!(a.unwrap(), "你好");
-        assert_eq!(b.unwrap(), "你好");
+            .await
+        });
+        // A newly arriving chapter must honor an observed 429. Requests already
+        // sent before that response cannot be retroactively paused.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if gate.lock().await.next_send > Instant::now() + Duration::from_millis(100) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let second = openai_compatible_translate(
+            &client,
+            "gpt-5.4-mini",
+            "Translate",
+            "Hello",
+            2000,
+            0.2,
+            "OpenAI",
+        )
+        .await;
+        assert_eq!(first.await.unwrap().unwrap(), "你好");
+        assert_eq!(second.unwrap(), "你好");
         server.await.unwrap();
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 3);
@@ -837,6 +987,121 @@ mod tests {
             assert!(request.get("max_tokens").is_none());
             assert!(request.get("temperature").is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn three_http_requests_overlap_before_any_response_is_returned() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let calls: RecordedCalls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let server = tokio::spawn(async move {
+            let mut handlers = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let barrier = barrier.clone();
+                let recorded = recorded.clone();
+                handlers.push(tokio::spawn(async move {
+                    let mut bytes = Vec::new(); let mut buffer = [0; 4096];
+                    let (header_end, length) = loop {
+                        let n = stream.read(&mut buffer).await.unwrap(); assert!(n > 0);
+                        bytes.extend_from_slice(&buffer[..n]);
+                        if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                            let header = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                            let length: usize = header.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap().parse().unwrap();
+                            break (end + 4, length);
+                        }
+                    };
+                    while bytes.len() < header_end + length {
+                        let n = stream.read(&mut buffer).await.unwrap(); assert!(n > 0);
+                        bytes.extend_from_slice(&buffer[..n]);
+                    }
+                    recorded.lock().unwrap().push((Instant::now(), serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap()));
+                    // The old HTTP-held mutex deadlocks here: it cannot send
+                    // the second/third request until the first returns.
+                    barrier.wait().await;
+                    let body = successful_chat();
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }));
+            }
+            for handler in handlers {
+                handler.await.unwrap();
+            }
+        });
+        let client = Client::with_config(
+            OpenAIConfig::new()
+                .with_api_key("fake-key")
+                .with_api_base(url),
+        );
+        let make = || {
+            openai_compatible_translate(
+                &client,
+                "gpt-5.4-mini",
+                "Translate",
+                "Hello",
+                3000,
+                0.2,
+                "OpenAI",
+            )
+        };
+        let results = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(make(), make(), make())
+        })
+        .await
+        .expect("three requests must reach the server concurrently");
+        assert_eq!(results.0.unwrap(), "你好");
+        assert_eq!(results.1.unwrap(), "你好");
+        assert_eq!(results.2.unwrap(), "你好");
+        server.await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(calls
+            .iter()
+            .all(|(_, request)| request["max_completion_tokens"] == 3000));
+        drop(calls);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_slots_are_reserved_atomically_after_limits_are_known() {
+        let gate = Arc::new(tokio::sync::Mutex::new(RequestSchedule {
+            next_send: Instant::now(),
+            token_interval: 0.001,
+            request_interval: 0.0,
+        }));
+        let start = Instant::now();
+        let (a, b, c) = tokio::join!(
+            reserve_request(&gate, 1000, "Mock"),
+            reserve_request(&gate, 1000, "Mock"),
+            reserve_request(&gate, 1000, "Mock")
+        );
+        a.unwrap();
+        b.unwrap();
+        c.unwrap();
+        assert!(Instant::now().duration_since(start) >= Duration::from_secs(2));
+        assert!(gate.lock().await.next_send.duration_since(start) >= Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sleeping_caller_rechecks_an_extended_shared_pause_without_holding_lock() {
+        let start = Instant::now();
+        let gate = Arc::new(tokio::sync::Mutex::new(RequestSchedule {
+            next_send: start + Duration::from_secs(1),
+            token_interval: 0.0,
+            request_interval: 0.0,
+        }));
+        let waiting_gate = gate.clone();
+        let waiting =
+            tokio::spawn(async move { reserve_request(&waiting_gate, 1000, "Mock").await });
+        tokio::task::yield_now().await;
+        gate.lock().await.defer(Duration::from_secs(3));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        waiting.await.unwrap().unwrap();
     }
 
     #[tokio::test]
