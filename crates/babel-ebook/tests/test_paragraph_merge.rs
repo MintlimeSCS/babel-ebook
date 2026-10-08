@@ -11,6 +11,7 @@ use std::sync::{
 struct Mock {
     calls: AtomicUsize,
     batches: AtomicUsize,
+    merged_batches: AtomicUsize,
     failure: &'static str,
     cancel: Option<CancellationToken>,
     inputs: Mutex<Vec<String>>,
@@ -20,6 +21,7 @@ impl Mock {
         Self {
             calls: AtomicUsize::new(0),
             batches: AtomicUsize::new(0),
+            merged_batches: AtomicUsize::new(0),
             failure,
             cancel: None,
             inputs: Mutex::new(vec![]),
@@ -58,6 +60,12 @@ impl Translator for Mock {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.batches.fetch_add(1, Ordering::SeqCst);
         self.inputs.lock().unwrap().push(text.into());
+        let parts: Vec<String> = serde_json::from_str(text).unwrap();
+        // R02 also uses translate_fragments to preserve inline markup. Only
+        // the R03 paragraph envelope identifies a paragraph-merge request.
+        if parts.iter().any(|s| s.starts_with("[[BABEL_P:")) {
+            self.merged_batches.fetch_add(1, Ordering::SeqCst);
+        }
         if let Some(token) = &self.cancel {
             token.cancel();
             return Err(BabelEbookError::Cancelled);
@@ -65,7 +73,6 @@ impl Translator for Mock {
         if self.failure == "truncated" {
             return Err(BabelEbookError::OutputTruncated("mock".into()));
         }
-        let parts: Vec<String> = serde_json::from_str(text).unwrap();
         let mut rows: Vec<String> = parts
             .iter()
             .map(|s| {
@@ -128,6 +135,7 @@ async fn merges_preserves_order_modes_and_reuses_individual_cache() {
         let output = run(html, &m, &o, &cache, None).await.unwrap();
         assert_eq!(m.calls.load(Ordering::SeqCst), 1);
         assert_eq!(m.batches.load(Ordering::SeqCst), 1);
+        assert_eq!(m.merged_batches.load(Ordering::SeqCst), 1);
         assert!(output.find("譯First source").unwrap() < output.find("譯Second source").unwrap());
         assert!(output.find("譯Second source").unwrap() < output.find("譯Third source").unwrap());
         assert!(!output.contains("[[BABEL_P"));
@@ -175,7 +183,10 @@ async fn boundaries_links_and_notes_keep_original_structure() {
     let o = options(OutputMode::TranslationOnly);
     let html="<html xmlns='http://www.w3.org/1999/xhtml'><body><p>First source</p><h2>Boundary heading</h2><p>Second source</p><p id='reference'>Linked <a href='#note'>source</a></p><section class='footnotes'><p id='note'>Note <a href='#reference'>back</a></p></section><p>Third source</p></body></html>";
     let output = run(html, &m, &o, &cache, None).await.unwrap();
-    assert_eq!(m.batches.load(Ordering::SeqCst), 0);
+    assert_eq!(m.merged_batches.load(Ordering::SeqCst), 0);
+    // The two paragraphs containing links still use the original structured
+    // translation path; neither is grouped with a neighbouring paragraph.
+    assert_eq!(m.batches.load(Ordering::SeqCst), 2);
     for attr in [
         "id=\"reference\"",
         "href=\"#note\"",
