@@ -218,8 +218,8 @@ pub async fn translate_epub_with_cancellation(
         }
     };
     let snapshot = collector.snapshot();
-    emit_progress(progress, ProgressEvent::UsageUpdated(snapshot.clone()));
     if !config.dry_run {
+        emit_progress(progress, ProgressEvent::UsageUpdated(snapshot.clone()));
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -237,6 +237,11 @@ pub async fn translate_epub_with_cancellation(
                 tracing::warn!(%error, "Could not save usage summary");
             }
         }
+    }
+    // Completion is the terminal event: final usage has already been emitted
+    // and its report saved. Dry runs already emit their own completion event.
+    if result.is_ok() && !config.dry_run {
+        emit_progress(progress, ProgressEvent::Completed);
     }
     result
 }
@@ -382,7 +387,6 @@ async fn translate_epub_inner(
     book.write(&config.output)?;
     tracing::info!(output = %config.output.display(), "EPUB written successfully");
     report_failures(&failures, translatable_indices.len())?;
-    emit_progress(progress, ProgressEvent::Completed);
     Ok(())
 }
 

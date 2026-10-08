@@ -384,9 +384,44 @@ async fn core_translate_epub_emits_progress_events() {
 
     let events: Vec<ProgressEvent> = callback.events.into_inner().expect("progress lock");
 
+    // Usage notifications may interleave with the original progress events.
+    // Preserve the original strict ordering check for all lifecycle events.
+    assert!(
+        matches!(events.last(), Some(ProgressEvent::Completed)),
+        "completion must remain the terminal event: {events:?}"
+    );
+    let usage: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProgressEvent::UsageUpdated(snapshot) => Some(snapshot),
+            _ => None,
+        })
+        .collect();
+    let final_usage = usage
+        .last()
+        .expect("translation emits its final usage snapshot");
+    assert_eq!(
+        final_usage.api_calls, 0,
+        "the fake translator sends no HTTP requests"
+    );
+    assert_eq!(final_usage.input_tokens, 0);
+    assert_eq!(final_usage.output_tokens, 0);
+    assert!(final_usage.local_cache_misses > 0);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ProgressEvent::Completed))
+            .count(),
+        1
+    );
+    let lifecycle: Vec<_> = events
+        .iter()
+        .filter(|event| !matches!(event, ProgressEvent::UsageUpdated(_)))
+        .cloned()
+        .collect();
     assert!(
         matches!(
-            events.as_slice(),
+            lifecycle.as_slice(),
             [
                 ProgressEvent::Started { total: 1 },
                 ProgressEvent::ChapterStarted { index: 1, .. },
@@ -420,4 +455,51 @@ async fn core_translate_epub_emits_progress_events() {
         ),
         "unexpected event sequence: {events:?}"
     );
+}
+
+#[tokio::test]
+async fn core_dry_run_preserves_terminal_completion_without_usage_notifications() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let fixture = create_sample_fixture(temp_dir.path());
+    let output = temp_dir.path().join("dry-progress.epub");
+    let mut config = test_config(fixture, output.clone(), temp_dir.path().join("cache"));
+    config.dry_run = true;
+    let callback = RecordingCallback::default();
+    translate_epub(&config, &FakeTranslator, None, Some(&callback))
+        .await
+        .expect("dry run succeeds");
+    let events = callback.events.into_inner().expect("progress lock");
+    assert!(matches!(
+        events.as_slice(),
+        [
+            ProgressEvent::Started { total: 1 },
+            ProgressEvent::Completed
+        ]
+    ));
+    assert!(!output.exists());
+}
+
+#[tokio::test]
+async fn core_failed_run_emits_final_usage_without_success_completion() {
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let fixture = create_sample_fixture(temp_dir.path());
+    let config = test_config(
+        fixture,
+        temp_dir.path().join("failed-progress.epub"),
+        temp_dir.path().join("cache"),
+    );
+    let callback = RecordingCallback::default();
+    assert!(
+        translate_epub(&config, &AlwaysFailingTranslator, None, Some(&callback))
+            .await
+            .is_err()
+    );
+    let events = callback.events.into_inner().expect("progress lock");
+    assert!(matches!(
+        events.last(),
+        Some(ProgressEvent::UsageUpdated(_))
+    ));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ProgressEvent::Completed)));
 }
