@@ -350,4 +350,14 @@ OpenAI translation HTTP attempts, actual response token usage (including cached 
 
 ## R03 (2026-10-08)
 
+Automatically recognise authored div text blocks using the existing protected
+translation/insertion pipeline, without retagging the source EPUB or requiring
+preprocessing. Nested chapter/layout containers remain intact; bare links outside
+selected paragraphs are translated separately. Plain adjacent div paragraphs can
+use the optional validated batching path, while div headings stay separate.
+Books containing newly selected blocks recheck old completed checkpoints using a
+selection-version suffix; existing translation-v2 caches and ordinary p-only
+book checkpoints remain compatible. Add div modes/link/scope/cache and upgrade
+resume regressions; their Cargo execution requires the CI dependency environment.
+
 Optional adjacent plain paragraphs are batched under token budgets and validated using per-paragraph identifiers. Invalid/truncated responses fall back to the original individual translation path. IDs, links, nested markup, semantic note regions, headings, document boundaries and refinement retain the existing path. Default: disabled, 120 source tokens per paragraph, 4 paragraphs per group. Individual translation-v2 keys and checkpoint identities remain compatible. See R03_STEPS_zh-TW.md for validation limits and Windows build instructions.
