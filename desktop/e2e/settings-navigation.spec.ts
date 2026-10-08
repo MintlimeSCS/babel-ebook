@@ -192,6 +192,23 @@ test("About shows the custom program revision", async () => {
   const browser = await chromium.connectOverCDP(cdpUrl);
   const page = browser.contexts()[0].pages()[0];
   await page.getByRole("button", { name: "About", exact: true }).click();
-  await expect(page.locator(".about-page")).toContainText("R02");
+  await expect(page.locator(".about-page")).toContainText("R03");
+  await browser.close();
+});
+
+// Run on Windows/WebView2 with the built release installer binary.
+test("usage pricing is configurable on the Model settings page", async () => {
+  const browser = await chromium.connectOverCDP(cdpUrl);
+  const page = browser.contexts()[0].pages()[0];
+  await page.getByTestId("nav-settings").click();
+  await page.getByTestId("settings-tab-model").click();
+  await expect(page.getByTestId("usage-price-input")).toBeVisible();
+  await page.getByTestId("usage-price-input").fill("0.75");
+  await expect(page.getByTestId("usage-price-input")).toHaveValue("0.75");
+  await page.getByTestId("usage-price-input").fill("");
+  await expect(page.getByTestId("paragraph-merge-enabled")).not.toBeChecked();
+  await page.getByTestId("paragraph-merge-enabled").check();
+  await expect(page.getByTestId("paragraph-merge-enabled")).toBeChecked();
+  await page.getByTestId("paragraph-merge-enabled").uncheck();
   await browser.close();
 });
