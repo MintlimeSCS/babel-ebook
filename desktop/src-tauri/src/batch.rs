@@ -202,6 +202,8 @@ mod tests {
             concurrency: 1,
             max_input_tokens: 1000,
             max_output_tokens: 500,
+            usage_prices: babel_ebook::usage::UsagePrices::default(),
+            paragraph_merge: babel_ebook::config::ParagraphMerge::default(),
             temperature: 0.3,
             source_lang: "en".to_string(),
             target_lang: "zh-CN".to_string(),

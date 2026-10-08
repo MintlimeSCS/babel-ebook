@@ -77,6 +77,8 @@ pub fn build_config(args: &TranslateArgs) -> Result<Config, String> {
     config.max_output_tokens = args.max_output_tokens as usize;
     config.cache_dir = PathBuf::from(".babel_ebook_cache");
     config.temperature = args.temperature;
+    config.usage_prices = args.usage_prices.clone();
+    config.paragraph_merge = args.paragraph_merge.clone();
     config.source_lang.clone_from(&args.source_lang);
     config.target_lang.clone_from(&args.target_lang);
     config.dry_run = args.dry_run;
@@ -144,6 +146,8 @@ mod tests {
             concurrency: 1,
             max_input_tokens: 4000,
             max_output_tokens: 2000,
+            usage_prices: babel_ebook::usage::UsagePrices::default(),
+            paragraph_merge: babel_ebook::config::ParagraphMerge::default(),
             temperature: 0.3,
             source_lang: "en".to_string(),
             target_lang: "zh-CN".to_string(),
