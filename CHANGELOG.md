@@ -341,3 +341,13 @@
 - Release version 0.2.0.
 
 修正續譯清單的 Tauri 呼叫參數名稱：已有檢查點時不再因參數錯誤而顯示空清單。新增 Windows 續譯清單回歸測試。
+
+
+## R02 UsageStats (2026-10-08)
+
+OpenAI translation HTTP attempts, actual response token usage (including cached input), local validated cache hits/misses, retries, and model-bound configurable USD estimates are reported live in the log. Each execution writes a separate `<output>.usage-<timestamp>.json`, including errors and cancellation. Resumed checkpoints contribute no historical token usage. Missing usage remains explicitly unknown, rather than estimated from text length. Rates default to unset. Existing prompts and translation cache keys are unchanged.
+
+
+## R03 (2026-10-08)
+
+Optional adjacent plain paragraphs are batched under token budgets and validated using per-paragraph identifiers. Invalid/truncated responses fall back to the original individual translation path. IDs, links, nested markup, semantic note regions, headings, document boundaries and refinement retain the existing path. Default: disabled, 120 source tokens per paragraph, 4 paragraphs per group. Individual translation-v2 keys and checkpoint identities remain compatible. See R03_STEPS_zh-TW.md for validation limits and Windows build instructions.
