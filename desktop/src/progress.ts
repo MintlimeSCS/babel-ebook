@@ -7,7 +7,14 @@
  * use a single `switch` with exhaustiveness checking.
  */
 
+export interface UsageSnapshot {
+  provider_model: string; api_calls: number; input_tokens: number; output_tokens: number;
+  cached_input_tokens: number; local_cache_hits: number; local_cache_misses: number;
+  http_retries: number; recovery_retries: number; usage_responses: number;
+  unreported_requests: number; estimated_cost_usd: number | null;
+}
 export type ProgressPayload =
+  | { type: "UsageUpdated"; usage: UsageSnapshot }
   | { type: "Started"; total: number }
   | { type: "ChapterStarted"; index: number; href: string }
   | { type: "ChapterFinished"; index: number; href: string }
@@ -78,6 +85,13 @@ export function parseProgressPayload(raw: unknown): ProgressPayload | null {
   if (!isRecord(data)) return null;
 
   switch (key) {
+    case "UsageUpdated": {
+      if (!isString(data.provider_model)) return null;
+      const keys = ["api_calls", "input_tokens", "output_tokens", "cached_input_tokens", "local_cache_hits", "local_cache_misses", "http_retries", "recovery_retries", "usage_responses", "unreported_requests"];
+      if (!keys.every((key) => isNumber(data[key]) && Number.isSafeInteger(data[key]) && (data[key] as number) >= 0)) return null;
+      if (data.estimated_cost_usd !== null && (!isNumber(data.estimated_cost_usd) || data.estimated_cost_usd < 0)) return null;
+      return { type: "UsageUpdated", usage: data as unknown as UsageSnapshot };
+    }
     case "Started": {
       const total = (data as { total?: unknown }).total;
       if (!isNumber(total)) return null;
