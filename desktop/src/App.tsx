@@ -216,10 +216,8 @@ function App() {
       max_input_tokens: form.max_input_tokens,
       max_output_tokens: form.max_output_tokens,
       temperature: form.temperature,
-      usage_prices: form.usage_prices,
-      paragraph_merge: form.paragraph_merge,
     }),
-    [form.model, form.max_input_tokens, form.max_output_tokens, form.temperature, form.usage_prices, form.paragraph_merge]
+    [form.model, form.max_input_tokens, form.max_output_tokens, form.temperature]
   );
 
   const translationSettings: TranslationSettingsState = useMemo(

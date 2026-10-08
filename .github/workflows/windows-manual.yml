@@ -1,4 +1,4 @@
-name: Build Windows installer R03
+name: Build Windows installer R02
 
 on:
   workflow_dispatch:
@@ -26,11 +26,6 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: desktop/pnpm-lock.yaml
-      - name: Test paragraph response validation
-        shell: pwsh
-        run: |
-          rustc --edition 2021 --test crates/babel-ebook/src/html/merge_validation.rs -o merge-validation-tests.exe
-          ./merge-validation-tests.exe
       - name: Test translation core
         run: cargo test --locked -p babel-ebook
       - name: Install desktop dependencies
@@ -39,9 +34,6 @@ jobs:
       - name: Build desktop frontend
         working-directory: desktop
         run: pnpm build
-      - name: Test usage progress parser
-        working-directory: desktop
-        run: node scripts/test-usage.mjs
       - name: Test desktop configuration
         run: cargo test --locked -p babel-ebook-desktop --lib config::tests
       - name: Build Windows installer
@@ -50,7 +42,7 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: BabelEbook-Windows-R03
+          name: BabelEbook-Windows-R02
           path: target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
           retention-days: 14

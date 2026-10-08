@@ -22,8 +22,6 @@ use selection::{
 
 mod insertion;
 mod markup;
-mod merge_validation;
-mod merging;
 mod notes;
 mod progress;
 mod selection;
@@ -102,27 +100,7 @@ pub async fn process_document(
         .or(cancellation);
 
     let formatting = translation::FormattingState::default();
-    let mut element_index = 0;
-    while element_index < elements.len() {
-        let current_index = element_index;
-        let consumed = merging::try_merge(
-            &elements[element_index..],
-            &skip_set,
-            translator,
-            options,
-            cache,
-            chapter_index,
-            chapter_href,
-            chapter_progress,
-            chapter_cancellation,
-        )
-        .await?;
-        if consumed > 0 {
-            element_index += consumed;
-            continue;
-        }
-        let element = &elements[element_index];
-        element_index += 1;
+    for (element_index, element) in elements.into_iter().enumerate() {
         let node = element.as_node();
         if skip_set.contains(&node_ptr(node)) || is_inside_excluded_subtree(node, &skip_set) {
             continue;
@@ -134,7 +112,7 @@ pub async fn process_document(
             continue;
         }
         translate_element_text_and_attributes(
-            element,
+            &element,
             translator,
             options,
             cache,
@@ -148,7 +126,7 @@ pub async fn process_document(
         .map_err(|error| match error {
             BabelEbookError::OutputTruncated(message) => BabelEbookError::OutputTruncated(format!(
                 "{message}; selected element {} <{}>{}",
-                current_index + 1,
+                element_index + 1,
                 element.name.local,
                 element
                     .attributes

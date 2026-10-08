@@ -451,13 +451,3 @@ MIT
 选择源文件后，翻译页面只显示内容哈希与该源文件一致的续译记录，其他书籍的记录自动隐藏。同名但内容不同的文件不会匹配。同一源文件的多笔记录仍可分别选择；选择记录后点击「开始翻译」续译。
 
 没有选择源文件时，界面提示先选择文件，不读取全部记录。没有匹配记录、正在读取及读取失败会显示不同提示。隐藏记录不会删除检查点或缓存，也不会调用翻译 API。
-
-
-## R02 UsageStats (2026-10-08)
-
-OpenAI translation HTTP attempts, actual response token usage (including cached input), local validated cache hits/misses, retries, and model-bound configurable USD estimates are reported live in the log. Each execution writes a separate `<output>.usage-<timestamp>.json`, including errors and cancellation. Resumed checkpoints contribute no historical token usage. Missing usage remains explicitly unknown, rather than estimated from text length. Rates default to unset. Existing prompts and translation cache keys are unchanged.
-
-
-## R03 (2026-10-08)
-
-Optional adjacent plain paragraphs are batched under token budgets and validated using per-paragraph identifiers. Invalid/truncated responses fall back to the original individual translation path. IDs, links, nested markup, semantic note regions, headings, document boundaries and refinement retain the existing path. Default: disabled, 120 source tokens per paragraph, 4 paragraphs per group. Individual translation-v2 keys and checkpoint identities remain compatible. See R03_STEPS_zh-TW.md for validation limits and Windows build instructions.

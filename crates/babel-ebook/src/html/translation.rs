@@ -18,7 +18,7 @@ struct FragmentResponse {
     translations: Vec<String>,
 }
 
-pub(super) fn decode_fragments(
+fn decode_fragments(
     response: &str,
     wrapped: bool,
     plain: bool,
@@ -301,7 +301,6 @@ async fn translate_with_recovery(
                 )));
             }
             requests += 1;
-            crate::usage::recovery_retry();
             tracing::warn!(attempt = requests, depth, source_tokens = count_tokens(&piece),
                 "Retrying a truncated translation with a smaller source piece; output limit unchanged");
             match translate_guarded(
@@ -351,27 +350,18 @@ async fn translate_with_recovery(
     Ok(output)
 }
 
-pub(super) async fn valid_cached(
-    cache: &TranslationCache,
-    scope: &str,
-    source: &str,
-) -> Option<String> {
-    let Some(cached) = cache.get_async(scope, source).await else {
-        crate::usage::cache_lookup(false);
-        return None;
-    };
+async fn valid_cached(cache: &TranslationCache, scope: &str, source: &str) -> Option<String> {
+    let cached = cache.get_async(scope, source).await?;
     if cached.trim().is_empty() || validate_markers(source, &cached).is_err() {
         tracing::warn!(
             "Ignoring an invalid cached translation; other successful cache entries are retained"
         );
-        crate::usage::cache_lookup(false);
         return None;
     }
-    crate::usage::cache_lookup(true);
     Some(cached)
 }
 
-pub(super) fn cache_scope(
+fn cache_scope(
     translator: &dyn Translator,
     options: &TranslationOptions,
     prompt: &str,
@@ -505,12 +495,7 @@ pub(super) async fn translate_text_with_state(
                 chunk_total,
                 false,
             );
-            let cached_chunk = if chunk == text {
-                None
-            } else {
-                valid_cached(cache, &translate_name, chunk).await
-            };
-            if let Some(cached) = cached_chunk {
+            if let Some(cached) = valid_cached(cache, &translate_name, chunk).await {
                 translated_parts.push(cached);
                 emit_chunk_progress(
                     progress,

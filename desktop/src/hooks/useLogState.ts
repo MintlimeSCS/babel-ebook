@@ -40,12 +40,6 @@ export function useLogState(): UseLogStateReturn {
       if (!payload) return;
 
       switch (payload.type) {
-        case "UsageUpdated": {
-          const u = payload.usage;
-          const message = `${u.provider_model}｜API ${u.api_calls} 次｜輸入 ${u.input_tokens}／輸出 ${u.output_tokens} Token｜API Cached Input ${u.cached_input_tokens}｜本地快取命中 ${u.local_cache_hits}／未命中 ${u.local_cache_misses}｜重試 ${u.http_retries + u.recovery_retries}（HTTP ${u.http_retries}／回復 ${u.recovery_retries}）｜用量未知 ${u.unreported_requests}｜估計費用 USD ${u.estimated_cost_usd === null ? "未設定單價" : u.estimated_cost_usd.toFixed(6)}（僅已回報用量）`;
-          setLogState((prev) => ({ ...prev, entries: [...prev.entries.filter((entry) => entry.id !== "usage-current"), { id: "usage-current", timestamp: Date.now(), kind: "info", message }] }));
-          break;
-        }
         case "Completed": {
           setLogState((prev) => ({
             ...prev,

@@ -69,8 +69,6 @@ fn test_config(
         api_key: Some("dummy".into()),
         base_url: None,
         model: "deepseek-chat".into(),
-        usage_prices: babel_ebook::usage::UsagePrices::default(),
-        paragraph_merge: babel_ebook::config::ParagraphMerge::default(),
         concurrency: 2,
         max_input_tokens: 4000,
         max_output_tokens: 2000,

@@ -125,21 +125,12 @@ export interface FormState {
   max_input_tokens: number;
   max_output_tokens: number;
   temperature: number;
-  usage_prices: UsagePrices;
-  paragraph_merge: { enabled: boolean; max_paragraph_tokens: number; max_paragraphs: number };
-}
-
-export interface UsagePrices {
-  model: string;
-  input: number | null;
-  cached_input: number | null;
-  output: number | null;
 }
 
 /** Model / inference parameters shown on the Model settings page. */
 export type ModelParams = Pick<
   FormState,
-  "model" | "max_input_tokens" | "max_output_tokens" | "temperature" | "usage_prices" | "paragraph_merge"
+  "model" | "max_input_tokens" | "max_output_tokens" | "temperature"
 >;
 
 /** Translation language, mode, style and element scope settings. */
@@ -306,8 +297,6 @@ export const defaults: FormState = {
   max_input_tokens: 4000,
   max_output_tokens: 2000,
   temperature: 0.3,
-  usage_prices: { model: "", input: null, cached_input: null, output: null },
-  paragraph_merge: { enabled: false, max_paragraph_tokens: 120, max_paragraphs: 4 },
 };
 
 export const providers = ["deepseek", "openai", "anthropic", "ollama"] as const;

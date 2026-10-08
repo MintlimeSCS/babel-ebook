@@ -98,8 +98,6 @@ const TRANSLATION_KEYS: Array<keyof FormState> = [
   "checkpoint_dir",
   "resume",
   "refine",
-  "usage_prices",
-  "paragraph_merge",
 ];
 
 /**
@@ -282,12 +280,6 @@ export async function loadSettings(): Promise<Partial<FormState>> {
     }
     if (typeof translation.resume !== "string") {
       translation.resume = "";
-    }
-    if (!translation.usage_prices || typeof translation.usage_prices !== "object") {
-      translation.usage_prices = { model: "", input: null, cached_input: null, output: null };
-    }
-    if (!translation.paragraph_merge || typeof translation.paragraph_merge !== "object") {
-      translation.paragraph_merge = { enabled: false, max_paragraph_tokens: 120, max_paragraphs: 4 };
     }
     translation.providers = normalizeProviders(translation.providers);
     translation.glossary = normalizeGlossary(translation.glossary);

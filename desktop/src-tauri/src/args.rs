@@ -41,10 +41,6 @@ pub struct TranslateArgs {
     pub concurrency: u32,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
-    #[serde(default)]
-    pub usage_prices: babel_ebook::usage::UsagePrices,
-    #[serde(default)]
-    pub paragraph_merge: babel_ebook::config::ParagraphMerge,
     pub temperature: f32,
     pub source_lang: String,
     pub target_lang: String,

@@ -172,8 +172,6 @@ pub(super) async fn openai_compatible_translate_with_format(
     let http_client = build_reqwest_client();
     for attempt in 0..=RATE_LIMIT_RETRIES {
         reserve_request(&gate, budget, provider_name).await?;
-        let mut usage_attempt =
-            crate::usage::RequestAttempt::start(attempt > 0, provider_name == "OpenAI");
         let response = http_client
             .post(client.config().url("/chat/completions"))
             .headers(client.config().headers())
@@ -199,7 +197,6 @@ pub(super) async fn openai_compatible_translate_with_format(
         let body = response.text().await.map_err(|error| {
             BabelEbookError::ApiError(format!("{provider_name} response read failed: {error}"))
         })?;
-        usage_attempt.response(&body);
         if status.is_success() {
             return extract_chat_content(&body, provider_name);
         }
