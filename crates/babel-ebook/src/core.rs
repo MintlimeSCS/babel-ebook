@@ -105,6 +105,8 @@ pub enum ProgressEvent {
         /// Error message describing the failure.
         error: String,
     },
+    /// Current per-run usage snapshot (local cache and API usage are separate).
+    UsageUpdated(crate::usage::UsageSnapshot),
     /// Translation has completed and the output EPUB has been written.
     Completed,
 }
@@ -189,6 +191,58 @@ pub async fn translate_epub(
 #[allow(clippy::future_not_send)]
 #[allow(clippy::too_many_lines)]
 pub async fn translate_epub_with_cancellation(
+    config: &Config,
+    translator: &dyn Translator,
+    cache: Option<&TranslationCache>,
+    progress: Option<&dyn ProgressCallback>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<(), BabelEbookError> {
+    let prices = if config.provider == "openai" {
+        config.usage_prices.clone()
+    } else {
+        crate::usage::UsagePrices::default()
+    };
+    let collector = crate::usage::UsageCollector::new(translator.name(), &config.model, &prices);
+    let mut updates = collector.subscribe();
+    let future = crate::usage::CURRENT.scope(
+        collector.clone(),
+        translate_epub_inner(config, translator, cache, progress, cancellation),
+    );
+    tokio::pin!(future);
+    let result = loop {
+        tokio::select! {
+            result = &mut future => break result,
+            changed = updates.changed() => {
+                if changed.is_ok() { emit_progress(progress, ProgressEvent::UsageUpdated(collector.snapshot())); }
+            }
+        }
+    };
+    let snapshot = collector.snapshot();
+    emit_progress(progress, ProgressEvent::UsageUpdated(snapshot.clone()));
+    if !config.dry_run {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let name = config
+            .output
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let path = config
+            .output
+            .with_file_name(format!("{name}.usage-{stamp}.json"));
+        if let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) {
+            if let Err(error) = tokio::fs::write(&path, bytes).await {
+                tracing::warn!(%error, "Could not save usage summary");
+            }
+        }
+    }
+    result
+}
+
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
+async fn translate_epub_inner(
     config: &Config,
     translator: &dyn Translator,
     cache: Option<&TranslationCache>,

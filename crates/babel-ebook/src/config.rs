@@ -109,6 +109,27 @@ pub struct GlossaryEntry {
     pub context: Option<String>,
 }
 
+/// Conservative adjacent plain-paragraph grouping; defaults to disabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ParagraphMerge {
+    /// Enable grouping when refinement is off.
+    pub enabled: bool,
+    /// Maximum source tokens in each eligible paragraph.
+    pub max_paragraph_tokens: usize,
+    /// Maximum adjacent paragraphs per request (2 through 8).
+    pub max_paragraphs: usize,
+}
+impl Default for ParagraphMerge {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_paragraph_tokens: 120,
+            max_paragraphs: 4,
+        }
+    }
+}
+
 /// Runtime configuration for the babel-ebook translation pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
@@ -127,6 +148,12 @@ pub struct Config {
     /// Model name to use with the provider.
     #[serde(default = "default_model")]
     pub model: String,
+    /// User-configured estimation rates, bound to one model.
+    #[serde(default)]
+    pub usage_prices: crate::usage::UsagePrices,
+    /// Optional conservative adjacent paragraph grouping.
+    #[serde(default)]
+    pub paragraph_merge: ParagraphMerge,
     /// Maximum number of concurrent translation requests.
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
@@ -219,6 +246,8 @@ impl Default for Config {
             api_key: None,
             base_url: None,
             model: default_model(),
+            usage_prices: crate::usage::UsagePrices::default(),
+            paragraph_merge: ParagraphMerge::default(),
             concurrency: default_concurrency(),
             max_input_tokens: default_max_input_tokens(),
             max_output_tokens: default_max_output_tokens(),
@@ -293,6 +322,8 @@ pub struct TranslationOptions {
     pub temperature: f32,
     /// Per-chapter custom system prompts keyed by chapter href.
     pub chapter_prompts: HashMap<String, String>,
+    /// Adjacent short plain-paragraph grouping.
+    pub paragraph_merge: ParagraphMerge,
 }
 
 /// Configurable prompt templates for each translation style.
@@ -632,6 +663,20 @@ impl Config {
         validate_non_empty_path(&self.output, "output")?;
         validate_output_parent(&self.output, "output")?;
 
+        if !(2..=8).contains(&self.paragraph_merge.max_paragraphs)
+            || !(1..=256).contains(&self.paragraph_merge.max_paragraph_tokens)
+        {
+            return Err(BabelEbookError::Configuration(
+                "Paragraph merge limits must be 2..8 paragraphs and 1..256 tokens per paragraph"
+                    .into(),
+            ));
+        }
+        if !self.usage_prices.valid() {
+            return Err(BabelEbookError::Configuration(
+                "Usage prices must be finite and nonnegative".into(),
+            ));
+        }
+
         // cache_dir
         validate_non_empty_path(&self.cache_dir, "cache_dir")?;
         validate_cache_dir(&self.cache_dir, "cache_dir")?;
@@ -736,6 +781,7 @@ impl Config {
             max_output_tokens: self.max_output_tokens,
             temperature: self.temperature,
             chapter_prompts: self.chapter_prompts.clone(),
+            paragraph_merge: self.paragraph_merge.clone(),
         }
     }
 

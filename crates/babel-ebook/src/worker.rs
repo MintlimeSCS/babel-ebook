@@ -288,6 +288,8 @@ mod tests {
             api_key: None,
             base_url: None,
             model: "dummy".into(),
+            usage_prices: crate::usage::UsagePrices::default(),
+            paragraph_merge: crate::config::ParagraphMerge::default(),
             concurrency: 1,
             max_input_tokens: 4000,
             max_output_tokens: 2000,
