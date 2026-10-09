@@ -140,7 +140,11 @@ pnpm tauri dev
 ## E2E Testing
 
 The manual `windows-manual.yml` installer build runs all core tests and the
-desktop configuration tests before building the NSIS installer. The artifact
+desktop configuration tests before building the NSIS installer. The workflow
+uses Rust 1.90.0 (with rustfmt and Clippy), matching R04's validated toolchain.
+Do not replace this with a rolling stable toolchain without revalidating the
+strict lint checks and build.
+The artifact
 is named `BabelEbook-Windows-R04`; this workflow has a 90-minute
 timeout to allow both debug tests and the release build. Settings UI regressions
 are covered by `desktop/e2e/settings-navigation.spec.ts` (run against the Windows
