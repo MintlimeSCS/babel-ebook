@@ -12,8 +12,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # Match the toolchain used to validate this R04 release.
+      - name: Install Rust 1.90.0
+        uses: dtolnay/rust-toolchain@1.90.0
         with:
           components: rustfmt, clippy
       - name: Cache Rust dependencies
