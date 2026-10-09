@@ -214,7 +214,7 @@ async fn broad_recovery_tree_stops_at_nine_attempts() {
 }
 
 #[tokio::test]
-async fn invalid_fragment_contract_during_recovery_fails_without_format_retries() {
+async fn invalid_fragment_contract_during_truncation_uses_shared_request_limit() {
     let dir = tempfile::tempdir().unwrap();
     let cache = TranslationCache::new(dir.path().into());
     let content = (0..8)
@@ -235,9 +235,13 @@ async fn invalid_fragment_contract_during_recovery_fails_without_format_retries(
     )
     .await
     .unwrap_err();
-    assert!(matches!(error, BabelEbookError::ApiError(_)));
+    assert!(
+        matches!(error, BabelEbookError::OutputTruncated(_)),
+        "{error}"
+    );
     assert!(error.to_string().contains("fragments"));
-    assert_eq!(translator.count(), 2);
+    assert!(error.to_string().contains("limit 9"));
+    assert_eq!(translator.count(), 9);
 }
 
 #[tokio::test]

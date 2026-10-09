@@ -144,7 +144,7 @@ fn href_path(href: &str) -> Result<String, BabelEbookError> {
 
 /// Add note semantics and return links only for explicit notes or reciprocal
 /// short-symbol references. Ambiguous IDs and ordinary navigation stay intact.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 pub fn repair_book_notes(book: &mut EpubBook) -> Result<usize, BabelEbookError> {
     let mut docs = Vec::new();
     for (i, c) in book.chapters.iter().enumerate() {

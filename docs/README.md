@@ -1,3 +1,38 @@
+# Custom program revision R04 — 2026-10-09
+
+Based directly on R02. The rolled-back R03 features are not included. Application
+version is 0.5.1; About and the manual Windows artifact identify the custom R04.
+
+- Native OpenAI `gpt-4.1-mini` and `gpt-4.1-mini-2025-04-14` now use the same
+  strict fragment contract as the supported GPT-5.4 family. Unknown/fine-tuned
+  models and proxy endpoints retain their locally validated JSON-array protocol.
+- A malformed count, invalid JSON, empty fragment or invented marker first
+  triggers one retry of the original multi-fragment request. If it still fails,
+  groups are divided only at existing source fragment boundaries, up to three
+  split levels. Small groups retain the original paragraph as reference context.
+- Formatting and explicit output-truncation recovery share **nine logical
+  translation attempts per source chunk**, including the initial attempt.
+  Provider HTTP retries for transient 429s remain bounded separately. The
+  configured output limit is never raised. Auth, quota, refusal and other
+  provider errors do not trigger formatting repair.
+- Every group and the final paragraph must pass count, nonblank and marker checks.
+  Failed responses are never cached as successes. Valid recovery groups have a
+  separate cache namespace and survive an interrupted attempt.
+- Failure diagnostics are local JSON files in `.babel_ebook_cache/diagnostics-r04/`.
+  They record chapter, selected-element position, expected/actual count, source
+  fragments and the failed response (at most 16,000 characters; truncation is
+  flagged). They contain no API key or full system prompt. Terminal errors show
+  the diagnostic path when available; a diagnostic write failure does not stop
+  otherwise valid recovery.
+- Successful translation-v2 caches, checkpoint fields/signatures, provider/model
+  identities and app identifier are unchanged. Keep the exact source path/file,
+  model, prompts, token settings and output settings to resume R02. Changing
+  models intentionally separates caches. The internal transport clarification
+  does not change the user prompt or invalidate already validated results.
+
+See `R04_UPDATE.md` at the repository root for build/install/resume instructions.
+Older sections below describe historical revisions and are superseded by R04.
+
 # Custom program revision R02
 
 Work item V00002; prompt V2.6 remains a separate version.

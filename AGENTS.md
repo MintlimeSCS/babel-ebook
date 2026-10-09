@@ -141,7 +141,7 @@ pnpm tauri dev
 
 The manual `windows-manual.yml` installer build runs all core tests and the
 desktop configuration tests before building the NSIS installer. The artifact
-is named `BabelEbook-Windows-R02`; this workflow has a 90-minute
+is named `BabelEbook-Windows-R04`; this workflow has a 90-minute
 timeout to allow both debug tests and the release build. Settings UI regressions
 are covered by `desktop/e2e/settings-navigation.spec.ts` (run against the Windows
 release binary).

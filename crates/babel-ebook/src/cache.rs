@@ -131,6 +131,36 @@ impl TranslationCache {
         }
     }
 
+    /// Save a failed formatting response separately from successful cache entries.
+    /// This is best effort, local only, and never stores credentials or prompts.
+    pub(crate) async fn write_format_diagnostic(
+        &self,
+        record: &serde_json::Value,
+    ) -> Option<PathBuf> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        if !self.enabled {
+            return None;
+        }
+        let directory = self.dir.join("diagnostics-r04");
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!("{time}-{}-{sequence}.json", std::process::id()));
+        let bytes = serde_json::to_vec_pretty(record).ok()?;
+        if let Err(error) = tokio::fs::create_dir_all(&directory).await {
+            tracing::warn!(%error, "Failed to create local R04 diagnostics directory");
+            return None;
+        }
+        if let Err(error) = tokio::fs::write(&path, bytes).await {
+            tracing::warn!(%error, "Failed to save local R04 formatting diagnostic");
+            return None;
+        }
+        Some(path)
+    }
+
     /// Remove all cached entries.
     ///
     /// Failures are logged but not propagated.

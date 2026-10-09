@@ -818,38 +818,47 @@ mod tests {
 
     #[tokio::test]
     async fn strict_fragment_contract_uses_one_http_call_and_same_output_limit() {
-        let content = r#"{"translations":["你好","世界"]}"#;
-        let response =
+        for model in ["gpt-4.1-mini-2025-04-14", "gpt-5.4-mini-2026-03-17"] {
+            let content = r#"{"translations":["你好","世界"]}"#;
+            let response =
             serde_json::json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}]})
                 .to_string();
-        let (url, calls, server) = mock_chat_server(vec![(200, "", response)]).await;
-        let client = Client::with_config(
-            OpenAIConfig::new()
-                .with_api_key("fake-key")
-                .with_api_base(url),
-        );
-        let format = serde_json::json!({"type":"json_schema","json_schema":{"name":"test","strict":true,"schema":{"type":"object"}}});
-        let result = openai_compatible_translate_with_format(
-            &client,
-            "gpt-5.4-mini-2026-03-17",
-            "Translate fragments",
-            r#"["hello","world"]"#,
-            2000,
-            0.3,
-            "OpenAI",
-            Some(format.clone()),
-        )
-        .await
-        .unwrap();
-        assert_eq!(result, content);
-        server.await.unwrap();
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let request = &calls[0].1;
-        assert_eq!(request["response_format"], format);
-        assert_eq!(request["max_completion_tokens"], 2000);
-        assert!(request.get("max_tokens").is_none());
-        assert!(request.get("temperature").is_none());
+            let (url, calls, server) = mock_chat_server(vec![(200, "", response)]).await;
+            let client = Client::with_config(
+                OpenAIConfig::new()
+                    .with_api_key("fake-key")
+                    .with_api_base(url),
+            );
+            let format = serde_json::json!({"type":"json_schema","json_schema":{"name":"test","strict":true,"schema":{"type":"object"}}});
+            let result = openai_compatible_translate_with_format(
+                &client,
+                model,
+                "Translate fragments",
+                r#"["hello","world"]"#,
+                2000,
+                0.3,
+                "OpenAI",
+                Some(format.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, content);
+            server.await.unwrap();
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            let request = &calls[0].1;
+            assert_eq!(request["response_format"], format);
+            if model.starts_with("gpt-5") {
+                assert_eq!(request["max_completion_tokens"], 2000);
+                assert!(request.get("max_tokens").is_none());
+                assert!(request.get("temperature").is_none());
+            } else {
+                assert_eq!(request["max_tokens"], 2000);
+                assert!(request.get("max_completion_tokens").is_none());
+                assert_eq!(request["temperature"], 0.3_f32);
+            }
+            drop(calls);
+        }
     }
 
     #[tokio::test]

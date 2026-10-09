@@ -387,8 +387,13 @@ async fn invented_formatting_in_fallback_is_rejected_and_not_cached() {
         None,
     )
     .await;
-    assert!(result.unwrap_err().to_string().contains("invalid JSON"));
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("protected EPUB formatting markers"));
+    assert!(std::fs::read_dir(dir.path())
+        .unwrap()
+        .all(|entry| entry.unwrap().path().is_dir()));
 }
 
 #[test]
@@ -740,24 +745,18 @@ async fn strict_fragments_need_no_marker_repair_or_per_fragment_requests_and_reu
 }
 
 #[tokio::test]
-async fn strict_fragments_distinguish_missing_and_empty_replies_without_retry_or_cache() {
-    for (reply, message) in [
-        (
-            r#"{"translations":["one"]}"#,
-            "returned 1 fragments; expected 2",
-        ),
-        (
-            r#"{"translations":["one"," "]}"#,
-            "empty fragment at position 2 of 2",
-        ),
-        (r#"{"translations":["one",null]}"#, "invalid JSON"),
+async fn strict_fragments_recover_missing_empty_and_invalid_replies_with_bounded_splitting() {
+    for reply in [
+        r#"{"translations":["one"]}"#,
+        r#"{"translations":["one"," "]}"#,
+        r#"{"translations":["one",null]}"#,
     ] {
         let dir = tempfile::tempdir().unwrap();
         let cache = TranslationCache::new(dir.path().into());
         let config = Config::default();
         let html = b"<p>First <em>second</em>.</p>";
         let bad = strict_model(Some(reply));
-        let err = process_document(
+        let recovered = process_document(
             html,
             &bad,
             &config.translation_options(),
@@ -768,26 +767,27 @@ async fn strict_fragments_distinguish_missing_and_empty_replies_without_retry_or
             None,
         )
         .await
-        .unwrap_err();
-        assert!(err.to_string().contains(message), "{err}");
-        assert_eq!(bad.calls.lock().unwrap().len(), 1);
-        let good = strict_model(None);
-        process_document(
-            html,
-            &good,
-            &config.translation_options(),
-            &cache,
-            0,
-            "ch1",
-            None,
-            None,
-        )
-        .await
         .unwrap();
+        assert_eq!(bad.calls.lock().unwrap().len(), 4);
+        let good = strict_model(None);
         assert_eq!(
-            good.calls.lock().unwrap().len(),
-            1,
-            "invalid response must not be cached"
+            process_document(
+                html,
+                &good,
+                &config.translation_options(),
+                &cache,
+                0,
+                "ch1",
+                None,
+                None
+            )
+            .await
+            .unwrap(),
+            recovered
+        );
+        assert!(
+            good.calls.lock().unwrap().is_empty(),
+            "validated full recovery is reusable"
         );
     }
 }

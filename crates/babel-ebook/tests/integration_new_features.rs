@@ -934,3 +934,96 @@ async fn resume_retranslates_after_prompt_or_glossary_changes_and_ignores_legacy
         .translation_signature
         .is_empty());
 }
+
+/// A serialized R02-shaped checkpoint must retain its completed chapter in R04.
+#[tokio::test]
+async fn r04_resumes_v2_checkpoint_and_translates_only_failed_inline_chapter() {
+    struct FragmentRecorder(Mutex<Vec<String>>);
+    #[async_trait]
+    impl Translator for FragmentRecorder {
+        fn name(&self) -> String {
+            "resume-fragment-model".into()
+        }
+        fn max_output_tokens(&self) -> usize {
+            2000
+        }
+        async fn translate(
+            &self,
+            text: &str,
+            _: &TranslateContext<'_>,
+        ) -> Result<String, babel_ebook::BabelEbookError> {
+            self.0.lock().unwrap().push(text.into());
+            if let Ok(fragments) = serde_json::from_str::<Vec<String>>(text) {
+                Ok(serde_json::to_string(
+                    &fragments
+                        .iter()
+                        .map(|s| format!("[ZH] {s}"))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap())
+            } else {
+                Ok(format!("[ZH] {text}"))
+            }
+        }
+    }
+    for model in ["gpt-4.1-mini-2025-04-14", "gpt-5.4-mini-2026-03-17"] {
+        let dir = TempDir::new().unwrap();
+        let source = create_epub(
+            dir.path(),
+            &[
+                ("ch01.xhtml".into(), None, "<p>ALREADY</p>".into()),
+                (
+                    "ch02.xhtml".into(),
+                    None,
+                    "<p>Before <em>after</em>.</p>".into(),
+                ),
+            ],
+        );
+        let mut config = test_config(
+            source.clone(),
+            dir.path().join("output.epub"),
+            dir.path().join("cache"),
+            dir.path().join("checkpoints"),
+        );
+        config.provider = "openai".into();
+        config.model = model.into();
+        config.translation_scope.toc = false;
+        config.translation_scope.metadata = false;
+        let book = babel_ebook::read_epub(&source).unwrap();
+        let saved = String::from_utf8(book.chapters[0].content.clone())
+            .unwrap()
+            .replace("ALREADY", "R02_COMPLETED_TRANSLATION");
+        let signature = CheckpointStore::translation_signature(&config);
+        let store = CheckpointStore::new(config.checkpoint_dir.clone()).unwrap();
+        let job_id = "r02-resume-fixture";
+        // These fields and status values are the R02 on-disk schema.
+        let fixture = serde_json::json!({
+            "job_id": job_id, "source_hash": CheckpointStore::source_hash(&source).unwrap(),
+            "translation_signature": signature, "source_path": source.to_string_lossy(),
+            "chapters": [
+                {"index":0,"href":book.chapters[0].href,"status":"completed","content":saved.as_bytes(),"error":null},
+                {"index":1,"href":book.chapters[1].href,"status":"failed","content":null,"error":"Formatting response returned 1 fragments; expected 2. No further repair requests were sent"}
+            ]
+        });
+        std::fs::write(
+            config.checkpoint_dir.join(format!("{job_id}.json")),
+            fixture.to_string(),
+        )
+        .unwrap();
+        config.resume_job_id = Some(job_id.into());
+        let recorder = FragmentRecorder(Mutex::new(Vec::new()));
+        translate_epub(&config, &recorder, None, None)
+            .await
+            .unwrap();
+        assert!(read_chapter_content(&config.output, "ch01").contains("R02_COMPLETED_TRANSLATION"));
+        assert!(read_chapter_content(&config.output, "ch02").contains("[ZH] after"));
+        assert_eq!(recorder.0.lock().unwrap().len(), 1);
+        assert!(!recorder.0.lock().unwrap()[0].contains("ALREADY"));
+        let checkpoint = store.load(job_id).unwrap();
+        assert_eq!(checkpoint.translation_signature, signature);
+        assert!(checkpoint
+            .chapters
+            .iter()
+            .all(|entry| entry.status == ChapterStatus::Completed));
+    }
+}

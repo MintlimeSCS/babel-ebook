@@ -1,3 +1,17 @@
+# Custom revision R04 — 2026-10-09 (app 0.5.1)
+
+- Base this revision on R02; exclude the rolled-back R03 feature changes.
+- Enable native strict fragment schemas for GPT-4.1-mini and its 2025-04-14 snapshot,
+  retaining GPT-5.4 support and model-specific token/temperature parameters.
+- Clarify the fragment transport contract after the user's translation prompt.
+- Recover malformed fragment responses with one retry followed by bounded group
+  splitting. Share the nine-attempt budget with existing truncation recovery.
+- Store rejected responses in separate local diagnostics, including selected
+  element, chapter and expected/actual fragment counts; never cache failed roots.
+- Retain validated v2 cache entries and serialized R02 checkpoints for resume.
+- Identify About and Windows workflow artifacts as R04. Bump app version to 0.5.1
+  with the same app identifier. Add offline recovery and checkpoint regressions.
+
 # Custom revision R02 — 2026-10-07
 
 - Retry explicitly truncated OpenAI-compatible responses with smaller source

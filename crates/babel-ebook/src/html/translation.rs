@@ -7,44 +7,18 @@ use crate::core::{BabelEbookError, CancellationToken, ProgressCallback};
 use crate::translator::{TranslateContext, Translator};
 use sha2::{Digest, Sha256};
 
-use super::markup::{marker_regex, validate_markers, MARKUP_PROMPT};
+use super::fragments::{self, RequestBudget};
+use super::markup::{marker_regex, validate_markers};
 
 #[derive(Default)]
-pub(super) struct FormattingState {}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FragmentResponse {
-    translations: Vec<String>,
+pub(super) struct FormattingState {
+    pub chapter_href: String,
+    pub element_index: Option<usize>,
 }
 
-fn decode_fragments(
-    response: &str,
-    wrapped: bool,
-    plain: bool,
-) -> Result<Vec<String>, BabelEbookError> {
-    let response = response.trim();
-    if plain {
-        return Ok(vec![response.to_string()]);
-    }
-    // Accept a surrounding code fence without relaxing structural validation.
-    let json = response.strip_prefix("```").map_or(response, |fenced| {
-        fenced
-            .split_once('\n')
-            .and_then(|(_, body)| body.trim().strip_suffix("```"))
-            .unwrap_or(response)
-            .trim()
-    });
-    if wrapped {
-        serde_json::from_str::<FragmentResponse>(json).map(|r| r.translations)
-    } else {
-        serde_json::from_str(json)
-    }
-    .map_err(|_| BabelEbookError::ApiError("Formatting response is invalid JSON for the required fragment contract; no further repair requests were sent".into()))
-}
 use super::progress::emit_chunk_progress;
 
-async fn cancellable_translate(
+pub(super) async fn cancellable_translate(
     text: &str,
     translator: &dyn Translator,
     context: &TranslateContext<'_>,
@@ -62,14 +36,18 @@ async fn cancellable_translate(
 }
 
 /// Keep protected formatting local for every provider. A marked paragraph is
-/// translated once as text fragments; a failed format never triggers a paid repair.
+/// translated as text fragments with a shared, bounded recovery request budget.
+#[allow(clippy::too_many_arguments)]
 async fn translate_guarded(
     chunk: &str,
     translator: &dyn Translator,
     context: &TranslateContext<'_>,
     max_input_tokens: usize,
     cancellation: Option<&CancellationToken>,
-    _formatting: &FormattingState,
+    formatting: &FormattingState,
+    cache: &TranslationCache,
+    scope: &str,
+    budget: &mut RequestBudget,
 ) -> Result<String, BabelEbookError> {
     if !marker_regex()
         .replace_all(chunk, "")
@@ -79,9 +57,20 @@ async fn translate_guarded(
         return Ok(chunk.to_string());
     }
     if marker_regex().is_match(chunk) {
-        return translate_structured(chunk, translator, context, max_input_tokens, cancellation)
-            .await;
+        return translate_structured(
+            chunk,
+            translator,
+            context,
+            max_input_tokens,
+            cancellation,
+            formatting,
+            cache,
+            scope,
+            budget,
+        )
+        .await;
     }
+    budget.take()?;
     let result = cancellable_translate(chunk, translator, context, cancellation).await?;
     validate_markers(chunk, &result)?;
     if result.trim().is_empty() {
@@ -92,12 +81,17 @@ async fn translate_guarded(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn translate_structured(
     chunk: &str,
     translator: &dyn Translator,
     context: &TranslateContext<'_>,
     max_input_tokens: usize,
     cancellation: Option<&CancellationToken>,
+    formatting: &FormattingState,
+    cache: &TranslationCache,
+    scope: &str,
+    budget: &mut RequestBudget,
 ) -> Result<String, BabelEbookError> {
     // Split locally, but send ALL meaningful text runs together in one request.
     // Markers, numeric-only runs, whitespace, code and images never reach the model.
@@ -118,60 +112,18 @@ async fn translate_structured(
     if meaningful.is_empty() {
         return Ok(chunk.to_string());
     }
-    let mut format = translator.fragment_response_format(meaningful.len());
-    let plain_fragment = meaningful.len() == 1;
-    // A single text run needs no JSON or schema at all: translate its text
-    // normally and restore surrounding elements locally, saving input tokens.
-    if plain_fragment {
-        format = None;
-    }
-    let payload = if plain_fragment {
-        meaningful[0].to_string()
-    } else {
-        serde_json::to_string(&meaningful).expect("text runs serialize")
-    };
-    let output_rule = if format.is_some() {
-        "Return ONLY a JSON object with a translations array."
-    } else {
-        "Return ONLY a JSON array."
-    };
-    let base_prompt = context.system_prompt.replace(MARKUP_PROMPT, "");
-    let prompt = if plain_fragment {
-        base_prompt
-    } else {
-        format!("{base_prompt}\nInput is an ordered JSON array of text fragments from one paragraph. Translate each fragment in context, including short fragments. {output_rule} Keep exactly {} nonempty strings in source order. Do not merge, omit or repeat text, or add commentary or code fences. Preserve fragment boundaries.", meaningful.len())
-    };
-    if count_tokens(&prompt)
-        .saturating_add(count_tokens(&payload))
-        .saturating_add(format.as_ref().map_or(0, |f| count_tokens(&f.to_string())))
-        .saturating_add(32)
-        > max_input_tokens
-    {
-        return Err(BabelEbookError::ApiError("Protected formatting repair exceeds the configured input-token budget; no extra request was sent".into()));
-    }
-    let repair_context = TranslateContext {
-        system_prompt: &prompt,
-        target_lang: context.target_lang,
-    };
-    let request = translator.translate_fragments(&payload, &repair_context, meaningful.len());
-    let response = if plain_fragment {
-        cancellable_translate(&payload, translator, &repair_context, cancellation).await?
-    } else if let Some(token) = cancellation {
-        tokio::select! {
-            biased;
-            () = token.cancelled() => return Err(BabelEbookError::Cancelled),
-            result = request => result?,
-        }
-    } else {
-        request.await?
-    };
-    let translated = decode_fragments(&response, format.is_some(), plain_fragment)?;
-    if translated.len() != meaningful.len() {
-        return Err(BabelEbookError::ApiError(format!("Formatting response returned {} fragments; expected {}. No further repair requests were sent", translated.len(), meaningful.len())));
-    }
-    if let Some(index) = translated.iter().position(|t| t.trim().is_empty()) {
-        return Err(BabelEbookError::ApiError(format!("Formatting response returned an empty fragment at position {} of {}. No further repair requests were sent", index + 1, meaningful.len())));
-    }
+    let translated = fragments::translate(
+        &meaningful,
+        translator,
+        context,
+        max_input_tokens,
+        cancellation,
+        budget,
+        cache,
+        scope,
+        formatting,
+    )
+    .await?;
     let mut translated = translated.iter();
     let mut output = String::new();
     for (index, run) in runs.iter().enumerate() {
@@ -195,7 +147,7 @@ async fn translate_structured(
 }
 
 const MAX_SPLIT_DEPTH: usize = 3;
-const MAX_RECOVERY_REQUESTS: usize = 9;
+const MAX_RECOVERY_REQUESTS: usize = fragments::MAX_REQUESTS;
 const MIN_SPLIT_TOKENS: usize = 32;
 
 /// Choose an exact UTF-8 boundary near the middle, preferring sentence ends
@@ -265,6 +217,7 @@ async fn translate_with_recovery(
     cache: &TranslationCache,
     scope: &str,
 ) -> Result<String, BabelEbookError> {
+    let mut budget = RequestBudget::default();
     let mut last_truncation = match translate_guarded(
         source,
         translator,
@@ -272,6 +225,9 @@ async fn translate_with_recovery(
         max_input_tokens,
         cancellation,
         formatting,
+        cache,
+        scope,
+        &mut budget,
     )
     .await
     {
@@ -287,7 +243,6 @@ async fn translate_with_recovery(
     let recovery_scope = format!("{scope}-adaptive-v1");
     let mut pending = vec![(right, 1), (left, 1)];
     let mut output = String::new();
-    let mut requests = 1;
     while let Some((piece, depth)) = pending.pop() {
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(BabelEbookError::Cancelled);
@@ -295,13 +250,13 @@ async fn translate_with_recovery(
         let translated = if let Some(cached) = valid_cached(cache, &recovery_scope, &piece).await {
             cached
         } else {
-            if requests >= MAX_RECOVERY_REQUESTS {
+            if budget.used >= MAX_RECOVERY_REQUESTS {
                 return Err(BabelEbookError::OutputTruncated(format!(
-                    "{last_truncation}; stopped after {requests} translation attempts (limit {MAX_RECOVERY_REQUESTS})"
+                    "{last_truncation}; stopped after {} translation attempts (limit {MAX_RECOVERY_REQUESTS}){}", budget.used,
+                    budget.last_format_failure.as_ref().map_or_else(String::new, |failure| format!("; last formatting failure: {failure}"))
                 )));
             }
-            requests += 1;
-            tracing::warn!(attempt = requests, depth, source_tokens = count_tokens(&piece),
+            tracing::warn!(attempt = budget.used + 1, depth, source_tokens = count_tokens(&piece),
                 "Retrying a truncated translation with a smaller source piece; output limit unchanged");
             match translate_guarded(
                 &piece,
@@ -310,6 +265,9 @@ async fn translate_with_recovery(
                 max_input_tokens,
                 cancellation,
                 formatting,
+                cache,
+                scope,
+                &mut budget,
             )
             .await
             {
@@ -332,7 +290,7 @@ async fn translate_with_recovery(
                         }
                     }
                     return Err(BabelEbookError::OutputTruncated(format!(
-                        "{last_truncation}; smaller-piece recovery stopped at depth {depth} after {requests} attempts"
+                        "{last_truncation}; smaller-piece recovery stopped at depth {depth} after {} attempts", budget.used
                     )));
                 }
                 Err(error) => return Err(error),
@@ -446,7 +404,10 @@ pub async fn translate_text(
         chapter_href,
         progress,
         cancellation,
-        &FormattingState::default(),
+        &FormattingState {
+            chapter_href: chapter_href.to_string(),
+            element_index: None,
+        },
     )
     .await
 }
@@ -530,6 +491,10 @@ pub(super) async fn translate_text_with_state(
                         chunk_index + 1
                     ))
                 }
+                BabelEbookError::ApiError(message) => BabelEbookError::ApiError(format!(
+                    "{chapter_href}, source chunk {} of {chunk_total}: {message}",
+                    chunk_index + 1
+                )),
                 other => other,
             })?;
             validate_markers(chunk, &result)?;

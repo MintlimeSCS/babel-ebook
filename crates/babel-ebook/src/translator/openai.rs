@@ -69,10 +69,12 @@ impl Translator for OpenAiTranslator {
     }
 
     fn fragment_response_format(&self, count: usize) -> Option<serde_json::Value> {
-        // Apply the new contract only to the affected, known-supported native
-        // GPT-5.4 models. Unknown/proxy models retain their existing protocol.
+        // Both selected model families support Structured Outputs on the native
+        // endpoint. Unknown, fine-tuned and proxy models keep their protocol.
         let native = self.config().api_base().trim_end_matches('/') == "https://api.openai.com/v1";
-        let supported = self.model == "gpt-5.4"
+        let supported = self.model == "gpt-4.1-mini"
+            || self.model == "gpt-4.1-mini-2025-04-14"
+            || self.model == "gpt-5.4"
             || self.model.strip_prefix("gpt-5.4-").is_some_and(|suffix| {
                 suffix == "mini"
                     || suffix.starts_with("mini-20")
@@ -157,7 +159,13 @@ mod tests {
 
     #[test]
     fn strict_fragments_are_limited_to_supported_native_models() {
-        for model in ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-mini-2026-03-17"] {
+        for model in [
+            "gpt-4.1-mini",
+            "gpt-4.1-mini-2025-04-14",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.4-mini-2026-03-17",
+        ] {
             let translator =
                 OpenAiTranslator::new("fake".into(), Some(model.into()), None, 2000, 0.3);
             let format = translator.fragment_response_format(5).unwrap();
@@ -168,7 +176,8 @@ mod tests {
             assert_eq!(array["items"]["pattern"], "\\S");
         }
         for (model, base) in [
-            ("gpt-4.1-mini", None),
+            ("gpt-4.1-mini-unknown", None),
+            ("gpt-4.1-mini", Some("https://proxy.example/v1".into())),
             ("gpt-5.4-chat-latest", None),
             ("ft:gpt-5.4-mini:custom", None),
             ("gpt-5.4-mini", Some("https://proxy.example/v1".into())),

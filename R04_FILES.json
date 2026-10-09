@@ -1,0 +1,153 @@
+{
+  "revision": "R04",
+  "app_version": "0.5.1",
+  "base_revision": "R02",
+  "base_zip_sha256": "873ba15b982633f244efba83eb0d952b475857410d91494e483a66d200d451ce",
+  "changed_file_count": 24,
+  "files": [
+    {
+      "path": ".github/workflows/windows-manual.yml",
+      "action": "replace",
+      "old_sha256": "e4a1ea9bb9dc26a27800d22d2a15dc038b8e5411f0f1b2eec23d0d1f78ba531b",
+      "new_sha256": "a33247886e98303da640d55ddbc2e6e8eafc40e894c3b604ee9a2256559d3b66"
+    },
+    {
+      "path": "AGENTS.md",
+      "action": "replace",
+      "old_sha256": "f8b849ab13a55753366c100663bd424a5b31b74e3699a0693d5543b31a93320c",
+      "new_sha256": "19bfef1fed5b93d35a86ddf36f52b0c4c7379ddc9c91aadfddd44101137728be"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "replace",
+      "old_sha256": "b138c22f60a6ec117cafc825f5d7302bd4643b3bc1ab5ce83b15e82e99efa171",
+      "new_sha256": "4010208053af9c7057526096cfc52b83e8d24a032a73384801fd3d024440e2ff"
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "replace",
+      "old_sha256": "3d4fc6e2ad154756614ef32f81fbbdd4788be0e1e6f50ec32bb27e1cd1f0de54",
+      "new_sha256": "81c4b643aaab6486a341bddacc1c4fa8c2ed5b579ab29e7184bd9a522eff8e51"
+    },
+    {
+      "path": "Cargo.toml",
+      "action": "replace",
+      "old_sha256": "e47408b7222a8b7bf9b553abddb765c1725d218bcae06ffe0fcc9209d25b2cf6",
+      "new_sha256": "160d0e7d11cb65eb3c8177f0ecc5ec31465049c25026cdee6683bc01760631da"
+    },
+    {
+      "path": "R04_UPDATE.md",
+      "action": "add",
+      "old_sha256": null,
+      "new_sha256": "df45a711470fc04de1c6d22c725088013b62c5baad6fc9b82fb34d25043532cd"
+    },
+    {
+      "path": "R04_VALIDATION.md",
+      "action": "add",
+      "old_sha256": null,
+      "new_sha256": "a7ac8832d2bc4ec6385d0de381809d907bea873f33c1056cef6dfe4b4ab85b91"
+    },
+    {
+      "path": "crates/babel-ebook/examples/verify_epub_structure.rs",
+      "action": "replace",
+      "old_sha256": "711b9ed045f6164387873c8d1701764b9340b34b64a4aa4a1156c3594aba5848",
+      "new_sha256": "cca5b5100023482933be394a57fe1b5f5a160d071c321940e51d11bd84475527"
+    },
+    {
+      "path": "crates/babel-ebook/src/cache.rs",
+      "action": "replace",
+      "old_sha256": "5dbf4a08d2563bd223e4bdfe9d0582855a808d05862c8cebc1870f39a053c541",
+      "new_sha256": "1048a00c6c8eeeedaeeecb60e3b13a9d3c210a326a29c00d3a7cc485211463e1"
+    },
+    {
+      "path": "crates/babel-ebook/src/html/fragments.rs",
+      "action": "add",
+      "old_sha256": null,
+      "new_sha256": "1af000f491faac2d221dd6803bd1f9fdc80edffbbb7e6ec30d024f417c01fcb4"
+    },
+    {
+      "path": "crates/babel-ebook/src/html/mod.rs",
+      "action": "replace",
+      "old_sha256": "17691777529752f1ed9876d0f0a60cdce34670c0bf7c7a8db6ac0013958171a3",
+      "new_sha256": "e6d74a6d9785c8b420410f3db99a36fc2e8f0712638f368f43d0b8142a7161f2"
+    },
+    {
+      "path": "crates/babel-ebook/src/html/notes.rs",
+      "action": "replace",
+      "old_sha256": "58610e4560ff8f2e43cbd8291e1381e41bce37ea6a36da0a543a3e2baca99f8d",
+      "new_sha256": "0825f8df82f800c62be4ad12aca70487ae163f0fd6ecff2ba38b2504e18f21de"
+    },
+    {
+      "path": "crates/babel-ebook/src/html/translation.rs",
+      "action": "replace",
+      "old_sha256": "bd84954a0c9bc99a02d7b9febce5ecbcc528ca52b2136812b863238fa9da6fdb",
+      "new_sha256": "e9fff6c98b25734d9f1f6aac240d783f64d6a11acf09393120f3ca117bfe8ef8"
+    },
+    {
+      "path": "crates/babel-ebook/src/translator/http_common.rs",
+      "action": "replace",
+      "old_sha256": "f77f63f5f8e3d3ee3bba611c7b4106986870908385f281a9ea39d055dcf50f40",
+      "new_sha256": "dc25e9a7c85979d059d5e7a2fd172d1e5ca62a974b4dd7ccf74498753f1324b5"
+    },
+    {
+      "path": "crates/babel-ebook/src/translator/openai.rs",
+      "action": "replace",
+      "old_sha256": "ff72c5545586ac00a5de0b0d1bc45d15cab615597b3af9008f819ec81b59c811",
+      "new_sha256": "569a097a69d1dea0aaca0300417c88abd311e07b0856a3b78e81fc44f8145334"
+    },
+    {
+      "path": "crates/babel-ebook/tests/integration_new_features.rs",
+      "action": "replace",
+      "old_sha256": "bcaf8b3fd698b300834c6f4d320b45bf2d46be770d0d8de37a76d5973a2f6935",
+      "new_sha256": "4cb21d15a31dc5b74a3f45cbbd3438c64249e49cd7d812baf5ed3454585a316a"
+    },
+    {
+      "path": "crates/babel-ebook/tests/test_r02.rs",
+      "action": "replace",
+      "old_sha256": "3433d042c475559074c3b7897d67a739fe7babd9cf9e20d2d7c23850538dc2cf",
+      "new_sha256": "d50c4d92b79c907401a12b304816bae67e9f3c3537b28e5956593c643b248a1d"
+    },
+    {
+      "path": "crates/babel-ebook/tests/test_r04.rs",
+      "action": "add",
+      "old_sha256": null,
+      "new_sha256": "a45a06178633a3cbe1a59804c85153a485047c7cfd50a606c57ac3b27f32e4cb"
+    },
+    {
+      "path": "crates/babel-ebook/tests/test_repairs.rs",
+      "action": "replace",
+      "old_sha256": "75a3ae89c5091098b59b7aedd74d54fd5f71f196c7ed752abcad8bee4f43f812",
+      "new_sha256": "aad95395991690cdec56f649aa782a394efe8878fb90fe61c6694d075b0fa28c"
+    },
+    {
+      "path": "desktop/e2e/settings-navigation.spec.ts",
+      "action": "replace",
+      "old_sha256": "2d2e71f3a0c04f6703ba009350ec9a91969d4c876d0c82ee0cd97d9632c23e02",
+      "new_sha256": "bdc3394b9ea0b29d54d758b9b2ecd55611c79ed9039924c20f090a7924db69e4"
+    },
+    {
+      "path": "desktop/package.json",
+      "action": "replace",
+      "old_sha256": "389b7a51b423a22da3e521c7d751ba28502ba40ee3a8c6c1dd051fd878b53871",
+      "new_sha256": "d4e6e55235384de6ef20c476e14cf34a54eead68ffe21ff0afc3226cd2deb4f7"
+    },
+    {
+      "path": "desktop/src-tauri/tauri.conf.json",
+      "action": "replace",
+      "old_sha256": "f975055a815acbae3317d26bcdd18cac48a5ec0d0a78c264e40e160ba06d3201",
+      "new_sha256": "e5a4d17d16aff2476f10df00e4c58ac11b38235c1c2bc319eccd0a60820585c1"
+    },
+    {
+      "path": "desktop/src/pages/AboutPage.tsx",
+      "action": "replace",
+      "old_sha256": "d004b72c29235029e17831cff32af8990bdbdcf579a43a290ab3d252c992a3eb",
+      "new_sha256": "04718b5994bf3aaa26b1c38711b3473ec1d50bad0d73e7382657204ec60d1efd"
+    },
+    {
+      "path": "docs/README.md",
+      "action": "replace",
+      "old_sha256": "0fc5eadab05c6ea661374b9337a9785b1e14a92935f7813da80a952ba774e89a",
+      "new_sha256": "a998c40098e47d2272392c6ca4cebd4b1f2d8cead60dd4901d57b60a4f7ac7a6"
+    }
+  ]
+}

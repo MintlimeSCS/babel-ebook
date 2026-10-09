@@ -20,6 +20,7 @@ use selection::{
     should_translate_element_text,
 };
 
+mod fragments;
 mod insertion;
 mod markup;
 mod notes;
@@ -99,7 +100,6 @@ pub async fn process_document(
         .and_then(ChapterChunkAdapter::cancellation)
         .or(cancellation);
 
-    let formatting = translation::FormattingState::default();
     for (element_index, element) in elements.into_iter().enumerate() {
         let node = element.as_node();
         if skip_set.contains(&node_ptr(node)) || is_inside_excluded_subtree(node, &skip_set) {
@@ -111,6 +111,10 @@ pub async fn process_document(
         if has_translatable_child(node, &translate_tags) {
             continue;
         }
+        let formatting = translation::FormattingState {
+            chapter_href: chapter_href.to_string(),
+            element_index: Some(element_index + 1),
+        };
         translate_element_text_and_attributes(
             &element,
             translator,
@@ -133,6 +137,11 @@ pub async fn process_document(
                     .borrow()
                     .get("id")
                     .map_or_else(String::new, |id| format!(" id={id}"))
+            )),
+            BabelEbookError::ApiError(message) => BabelEbookError::ApiError(format!(
+                "{chapter_href}; selected element {} <{}>: {message}",
+                element_index + 1,
+                element.name.local
             )),
             other => other,
         })?;

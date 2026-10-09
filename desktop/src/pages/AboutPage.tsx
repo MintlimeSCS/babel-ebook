@@ -36,7 +36,7 @@ export default function AboutPage({ onOpenLegal }: AboutPageProps) {
         <h3>{t("app_title")}</h3>
         <p>{t("subtitle")}</p>
         <p>
-          {t("about_version")}: {version || t("about_version_unknown")} (R02)
+          {t("about_version")}: {version || t("about_version_unknown")} (R04)
         </p>
       </section>
 
