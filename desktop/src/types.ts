@@ -216,6 +216,7 @@ export interface CheckpointInfo {
   source_hash: string;
   source_path: string;
   matches_current_source: boolean;
+  has_r05_compatibility: boolean;
   completed: number;
   total: number;
   failed: number;

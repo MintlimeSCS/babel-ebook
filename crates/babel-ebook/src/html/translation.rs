@@ -218,6 +218,7 @@ async fn translate_with_recovery(
     scope: &str,
 ) -> Result<String, BabelEbookError> {
     let mut budget = RequestBudget::default();
+    crate::diagnostics::source_depth(0);
     let mut last_truncation = match translate_guarded(
         source,
         translator,
@@ -258,6 +259,7 @@ async fn translate_with_recovery(
             }
             tracing::warn!(attempt = budget.used + 1, depth, source_tokens = count_tokens(&piece),
                 "Retrying a truncated translation with a smaller source piece; output limit unchanged");
+            crate::diagnostics::source_depth(depth);
             match translate_guarded(
                 &piece,
                 translator,
@@ -325,6 +327,26 @@ fn cache_scope(
     prompt: &str,
     phase: &str,
 ) -> String {
+    let settings = serde_json::json!([
+        translator.cache_identity(),
+        options.source_lang,
+        options.target_lang,
+        prompt,
+        options.temperature,
+        phase
+    ]);
+    format!(
+        "translation-r05-{}",
+        hex::encode(Sha256::digest(settings.to_string().as_bytes()))
+    )
+}
+
+fn legacy_cache_scope(
+    translator: &dyn Translator,
+    options: &TranslationOptions,
+    prompt: &str,
+    phase: &str,
+) -> String {
     // v2 excludes legacy caches that were not scoped to language/prompt settings.
     // Only translation settings are hashed; credentials never enter cache keys or files.
     let settings = serde_json::json!([
@@ -342,6 +364,20 @@ fn cache_scope(
         "translation-v2-{}",
         hex::encode(Sha256::digest(settings.to_string().as_bytes()))
     )
+}
+
+async fn cached_with_legacy(
+    cache: &TranslationCache,
+    scope: &str,
+    legacy: &str,
+    source: &str,
+) -> Option<String> {
+    if let Some(value) = valid_cached(cache, scope, source).await {
+        return Some(value);
+    }
+    let value = valid_cached(cache, legacy, source).await?;
+    cache.put_async(scope, source, &value, None).await;
+    Some(value)
 }
 
 pub(super) fn split_preserving_markers(text: &str, limit: usize) -> Vec<String> {
@@ -429,10 +465,14 @@ pub(super) async fn translate_text_with_state(
     }
     let system_prompt = options.system_prompt_for_chapter(chapter_href);
     let translate_name = cache_scope(translator, options, &system_prompt, "translate");
+    let legacy_translate_name =
+        legacy_cache_scope(translator, options, &system_prompt, "translate");
     // First pass. When refinement is disabled we can return a cached full-text
     // result immediately; otherwise the cached translation still needs to be
     // polished.
-    let first_pass = if let Some(cached) = valid_cached(cache, &translate_name, text).await {
+    let first_pass = if let Some(cached) =
+        cached_with_legacy(cache, &translate_name, &legacy_translate_name, text).await
+    {
         if !options.refine {
             return Ok(cached);
         }
@@ -456,7 +496,9 @@ pub(super) async fn translate_text_with_state(
                 chunk_total,
                 false,
             );
-            if let Some(cached) = valid_cached(cache, &translate_name, chunk).await {
+            if let Some(cached) =
+                cached_with_legacy(cache, &translate_name, &legacy_translate_name, chunk).await
+            {
                 translated_parts.push(cached);
                 emit_chunk_progress(
                     progress,
@@ -473,15 +515,25 @@ pub(super) async fn translate_text_with_state(
                 system_prompt: &system_prompt,
                 target_lang,
             };
-            let result = translate_with_recovery(
-                chunk,
-                translator,
-                &context,
-                options.max_input_tokens,
-                cancellation,
-                formatting,
-                cache,
-                &translate_name,
+            let result = crate::diagnostics::capture(
+                crate::diagnostics::DiagnosticContext::new(
+                    cache.diagnostic_directory(),
+                    chapter_href,
+                    formatting.element_index,
+                    chunk_index + 1,
+                    options.max_input_tokens,
+                    "translate",
+                ),
+                translate_with_recovery(
+                    chunk,
+                    translator,
+                    &context,
+                    options.max_input_tokens,
+                    cancellation,
+                    formatting,
+                    cache,
+                    &translate_name,
+                ),
             )
             .await
             .map_err(|error| match error {
@@ -531,14 +583,17 @@ pub(super) async fn translate_text_with_state(
     let refine_prompt = options.refine_prompt();
     let target_lang = &options.target_lang;
     let refine_name = cache_scope(translator, options, &refine_prompt, "refine");
+    let legacy_refine_name = legacy_cache_scope(translator, options, &refine_prompt, "refine");
 
     let chunks = split_preserving_markers(&first_pass, max_refine_source);
     let mut refined_parts = Vec::with_capacity(chunks.len());
-    for chunk in &chunks {
+    for (chunk_index, chunk) in chunks.iter().enumerate() {
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(BabelEbookError::Cancelled);
         }
-        if let Some(cached) = valid_cached(cache, &refine_name, chunk).await {
+        if let Some(cached) =
+            cached_with_legacy(cache, &refine_name, &legacy_refine_name, chunk).await
+        {
             refined_parts.push(cached);
             continue;
         }
@@ -547,15 +602,25 @@ pub(super) async fn translate_text_with_state(
             system_prompt: &refine_prompt,
             target_lang,
         };
-        let result = translate_with_recovery(
-            chunk,
-            translator,
-            &context,
-            options.max_input_tokens,
-            cancellation,
-            formatting,
-            cache,
-            &refine_name,
+        let result = crate::diagnostics::capture(
+            crate::diagnostics::DiagnosticContext::new(
+                cache.diagnostic_directory(),
+                chapter_href,
+                formatting.element_index,
+                chunk_index + 1,
+                options.max_input_tokens,
+                "refine",
+            ),
+            translate_with_recovery(
+                chunk,
+                translator,
+                &context,
+                options.max_input_tokens,
+                cancellation,
+                formatting,
+                cache,
+                &refine_name,
+            ),
         )
         .await?;
         validate_markers(chunk, &result)?;
@@ -569,4 +634,61 @@ pub(super) async fn translate_text_with_state(
     let refined = refined_parts.join(" ").trim().to_string();
     validate_markers(&first_pass, &refined)?;
     Ok(refined)
+}
+
+#[cfg(test)]
+mod r05_cache_tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct NeverCall;
+    #[async_trait]
+    impl Translator for NeverCall {
+        fn name(&self) -> String {
+            "legacy-cache-test".into()
+        }
+        fn max_output_tokens(&self) -> usize {
+            8000
+        }
+        async fn translate(
+            &self,
+            _: &str,
+            _: &TranslateContext<'_>,
+        ) -> Result<String, BabelEbookError> {
+            panic!("completed cache entry must not send an API request")
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_success_is_promoted_and_reused_after_token_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TranslationCache::new(dir.path().into());
+        let mut config = crate::config::Config {
+            max_input_tokens: 6000,
+            max_output_tokens: 8000,
+            system_prompt: Some("Translate only".into()),
+            ..crate::config::Config::default()
+        };
+        let translator = NeverCall;
+        let options = config.translation_options();
+        let legacy =
+            legacy_cache_scope(&translator, &options, &options.system_prompt(), "translate");
+        cache.put(&legacy, "Known paragraph.", "已完成段落。", None);
+        for input in [6000, 4000, 2000] {
+            config.max_input_tokens = input;
+            let result = translate_text(
+                "Known paragraph.",
+                &translator,
+                &config.translation_options(),
+                &cache,
+                0,
+                "chapter.xhtml",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, "已完成段落。");
+        }
+    }
 }

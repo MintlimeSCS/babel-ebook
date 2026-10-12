@@ -415,6 +415,14 @@ function TranslatePage({
               ) : (
                 <>
                   <p className="checkpoint-hint">{t("checkpoint_hint")}</p>
+                  <p className="checkpoint-hint" data-testid="checkpoint-settings-guard">
+                    {t("checkpoint_settings_guard")}
+                  </p>
+                  {selectedCheckpoint && !selectedCheckpoint.has_r05_compatibility && (
+                    <p className="checkpoint-hint" data-testid="checkpoint-legacy-hint">
+                      {t("checkpoint_legacy_hint")}
+                    </p>
+                  )}
                   {matchingCheckpoints.map((cp) => (
                     <div
                       key={cp.job_id}

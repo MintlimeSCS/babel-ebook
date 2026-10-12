@@ -331,5 +331,7 @@
   "glossary_translation": "Preferred translation",
   "glossary_context": "Context (optional)",
   "glossary_add": "Add term",
-  "glossary_remove": "Remove term"
+  "glossary_remove": "Remove term",
+  "checkpoint_settings_guard": "Source matching is checked here. Translation settings are checked before starting; incompatible records are preserved.",
+  "checkpoint_legacy_hint": "For the first R05 resume of an older record, use its original model, prompt and token settings. Afterwards, token limits can change without resetting completed chapters."
 }

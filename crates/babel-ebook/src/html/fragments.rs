@@ -188,6 +188,7 @@ pub(super) async fn translate(
             return Err(BabelEbookError::Cancelled);
         }
         let group = &fragments[start..end];
+        crate::diagnostics::fragment_range(start + 1, end, depth);
         let key = serde_json::json!([paragraph, start, end]).to_string();
         if depth > 0 {
             if let Some(cached) = cache.get_async(&group_scope, &key).await {

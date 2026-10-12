@@ -884,6 +884,20 @@ impl TranslationOptions {
         let output = self.max_output_tokens.saturating_sub(200);
         input.min(output).max(1)
     }
+
+    /// Reject a prompt that leaves no safe source budget before calling an API.
+    pub fn validate_input_budget(&self, prompt: &str) -> Result<(), crate::core::BabelEbookError> {
+        let estimated_prompt_tokens = crate::chunking::count_tokens(prompt);
+        let required = estimated_prompt_tokens
+            .saturating_add(50)
+            .saturating_add(32);
+        if self.max_input_tokens < required {
+            return Err(crate::core::BabelEbookError::Configuration(format!(
+                "Input token limit {} is too small: the effective prompt needs approximately {estimated_prompt_tokens} tokens; allow at least {required} including source and framing. Existing progress was preserved; no translation request was sent.", self.max_input_tokens
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn default_provider() -> String {

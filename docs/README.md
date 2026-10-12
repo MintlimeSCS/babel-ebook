@@ -1,3 +1,14 @@
+# Custom program revision R05 — 2026-10-12
+
+Application version: **0.5.2 (R05)**. This revision builds on R04, including its published pinned Rust 1.90.0 Windows workflow fix. See `R05_Update_Guide.md` for the Windows update and restored-book procedure.
+
+- A mismatched or unreadable checkpoint is preserved and translation stops; it is never silently replaced by an empty job. Compatible runs keep three backups in the checkpoint `backups/` subdirectory.
+- For the first R05 use of a legacy R02/R04 checkpoint, retain the original model, prompt and token settings. A successful settings check saves R05 compatibility before any paid chapter request, even if that chapter later fails. Subsequent token-limit changes preserve completed chapters and successful R05 cache entries.
+- Input limits must still fit the effective prompt. The preflight reports the estimated minimum and stops without resetting progress or making a paid request.
+- Explicit output truncation is recorded under the configured cache directory's `diagnostics-r05/`. The failure message includes the absolute file path. Files contain only failed request source, bounded raw response, token usage, model/request settings and recovery position; no API key, authorization headers or system prompt text. Raw records longer than the cap retain head/tail excerpts with omitted-character counts. Keep at most 50 files and 10 MiB.
+- Existing format-error diagnostics remain under `diagnostics-r04/`; the unchanged R04 transport/recovery protocol is retained. Truncated responses never enter the successful translation cache.
+- The resume badge checks source identity only. Settings compatibility is checked before starting. Incompatible prompt/model/language changes need a separate checkpoint directory/new job, leaving the original task intact.
+
 # Custom program revision R04 — 2026-10-09
 
 Based directly on R02. The rolled-back R03 features are not included. Application

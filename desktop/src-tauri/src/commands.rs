@@ -26,6 +26,8 @@ pub struct CheckpointInfo {
     pub source_path: String,
     /// Whether this checkpoint matches the currently selected source file.
     pub matches_current_source: bool,
+    /// Whether token-independent R05 compatibility has already been recorded.
+    pub has_r05_compatibility: bool,
     /// Number of completed chapters.
     pub completed: usize,
     /// Total number of chapters.
@@ -55,6 +57,7 @@ impl CheckpointInfo {
             source_hash: cp.source_hash.clone(),
             source_path: cp.source_path.clone(),
             matches_current_source: false,
+            has_r05_compatibility: !cp.compatibility_signature.is_empty(),
             completed,
             total,
             failed,
@@ -797,6 +800,7 @@ mod tests {
             source_hash: "abc123".to_string(),
             source_path: "/input/book.epub".to_string(),
             translation_signature: String::new(),
+            compatibility_signature: String::new(),
             chapters: vec![
                 babel_ebook::checkpoint::ChapterCheckpoint {
                     index: 0,

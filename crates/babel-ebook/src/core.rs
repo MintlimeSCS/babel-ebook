@@ -128,7 +128,7 @@ pub enum BabelEbookError {
     ApiError(String),
 
     /// A provider explicitly reported an incomplete response at its output limit.
-    /// The partial text is discarded; callers may retry smaller source pieces.
+    /// Partial text never becomes a successful translation; callers may retry smaller pieces.
     OutputTruncated(String),
 
     /// The requested translation provider is not supported.
@@ -265,6 +265,7 @@ pub async fn translate_epub_with_cancellation(
     )
     .await?;
     let failures = pipeline_result.failures;
+    let restored = pipeline_result.restored;
 
     ensure_not_cancelled(cancellation)?;
 
@@ -275,6 +276,23 @@ pub async fn translate_epub_with_cancellation(
             if let Some(title) = book.chapters[*index].title.clone() {
                 let href = book.chapters[*index].href.clone();
                 if failed_hrefs.contains(href.as_str()) {
+                    continue;
+                }
+                if restored.contains(index) {
+                    if let Some(label) = numbered_title_from_document(
+                        &title,
+                        &book.chapters[*index].content,
+                        &config.target_lang,
+                    )
+                    .or_else(|| {
+                        resumed_title_from_document(
+                            &book.chapters[*index].content,
+                            &config.target_lang,
+                        )
+                    }) {
+                        book.chapters[*index].title = Some(label);
+                    }
+                    // Restored chapter text must not cause fresh title API calls.
                     continue;
                 }
                 // Keep the chapter number local and reuse its translated date
@@ -424,6 +442,26 @@ fn numbered_title_from_document(title: &str, html: &[u8], target_lang: &str) -> 
         return None;
     };
     (!label.is_empty()).then(|| format!("{number} {label}"))
+}
+
+fn resumed_title_from_document(html: &[u8], target_lang: &str) -> Option<String> {
+    use kuchiki::traits::TendrilSink;
+    let doc = kuchiki::parse_html().one(std::str::from_utf8(html).ok()?);
+    let headings: Vec<_> = doc.select("body h1, body h2, body h3").ok()?.collect();
+    let heading = headings.iter().find(|heading| {
+        heading.attributes.borrow().get("lang") == Some(target_lang)
+            || (target_lang.starts_with("zh")
+                && heading
+                    .text_contents()
+                    .chars()
+                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)))
+    })?;
+    let label = heading
+        .text_contents()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!label.is_empty()).then_some(label)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -61,7 +61,7 @@ async fn translate(
 }
 
 #[tokio::test]
-async fn cache_separates_languages_prompts_glossaries_and_request_parameters() {
+async fn cache_separates_semantic_settings_and_reuses_valid_text_after_token_changes() {
     let dir = tempfile::tempdir().unwrap();
     let cache = TranslationCache::new(dir.path().into());
     cache.put("recording:model", "Hello world", "LEGACY", None);
@@ -95,8 +95,10 @@ async fn cache_separates_languages_prompts_glossaries_and_request_parameters() {
     translate(&config, &translator, &cache, "ch1").await;
     config.max_output_tokens = 3000;
     translate(&config, &translator, &cache, "ch1").await;
+    config.max_input_tokens = 2000;
+    translate(&config, &translator, &cache, "ch1").await;
     let requests = translator.requests.lock().unwrap();
-    assert_eq!(requests.len(), 9);
+    assert_eq!(requests.len(), 8);
     assert!(requests[4].1.contains("Mercer => 默瑟 (context: surname)"));
     assert!(requests[6].1.contains("Chapter override"));
     assert!(requests[6].1.contains("Mercer => 默瑟"));

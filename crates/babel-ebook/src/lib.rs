@@ -16,6 +16,7 @@ pub mod checkpoint;
 pub mod chunking;
 pub mod config;
 pub mod core;
+mod diagnostics;
 pub mod epub;
 pub mod escape;
 pub mod html;

@@ -714,7 +714,7 @@ async fn refine_pass_runs_second_pass() {
 }
 
 #[tokio::test]
-async fn resume_ignores_checkpoint_when_source_hash_mismatches() {
+async fn resume_preserves_checkpoint_when_source_hash_mismatches() {
     let temp_dir = TempDir::new().expect("create temp dir");
     let checkpoint_dir = temp_dir.path().join("checkpoints");
     let cache_dir = temp_dir.path().join("cache");
@@ -758,28 +758,24 @@ async fn resume_ignores_checkpoint_when_source_hash_mismatches() {
     );
     config2.resume_job_id = Some(job_id.clone());
 
-    translate_epub(&config2, &FakeTranslator, None, None)
+    let before = std::fs::read(config2.checkpoint_dir.join(format!("{job_id}.json"))).unwrap();
+    let error = translate_epub(&config2, &FakeTranslator, None, None)
         .await
-        .expect("second run should succeed");
-
-    let second_cp = store
-        .load(&job_id)
-        .expect("checkpoint exists after second run");
-    assert_ne!(
-        first_cp.source_hash, second_cp.source_hash,
-        "checkpoint should be updated with the new source hash"
+        .unwrap_err();
+    assert!(error.to_string().contains("preserved"));
+    assert_eq!(
+        std::fs::read(config2.checkpoint_dir.join(format!("{job_id}.json"))).unwrap(),
+        before
     );
-
-    let content = read_chapter_content(&output2, "ch01");
-    assert!(
-        content.contains("<p lang=\"zh-CN\">[ZH] Modified text</p>"),
-        "modified chapter should be translated from scratch: {}",
-        content
+    assert_eq!(
+        store.load(&job_id).unwrap().source_hash,
+        first_cp.source_hash
     );
+    assert!(!output2.exists());
 }
 
 #[tokio::test]
-async fn resume_treats_corrupted_checkpoint_as_fresh() {
+async fn resume_stops_and_preserves_corrupted_checkpoint() {
     let temp_dir = TempDir::new().expect("create temp dir");
     let checkpoint_dir = temp_dir.path().join("checkpoints");
     let cache_dir = temp_dir.path().join("cache");
@@ -809,20 +805,24 @@ async fn resume_treats_corrupted_checkpoint_as_fresh() {
     let mut config = test_config(source, output.clone(), cache_dir, checkpoint_dir);
     config.resume_job_id = Some(job_id);
 
-    translate_epub(&config, &FakeTranslator, None, None)
+    let error = translate_epub(&config, &FakeTranslator, None, None)
         .await
-        .expect("translation should succeed despite corrupted checkpoint");
-
-    let content = read_chapter_content(&output, "ch01");
-    assert!(
-        content.contains("<p lang=\"zh-CN\">[ZH] Hello world</p>"),
-        "chapter should be translated as a fresh job: {}",
-        content
+        .unwrap_err();
+    assert!(error.to_string().contains("Cannot parse checkpoint"));
+    assert_eq!(
+        std::fs::read_to_string(
+            config
+                .checkpoint_dir
+                .join(format!("{}.json", config.resume_job_id.as_ref().unwrap()))
+        )
+        .unwrap(),
+        "this is not json"
     );
+    assert!(!output.exists());
 }
 
 #[tokio::test]
-async fn enabling_refine_invalidates_completed_chapters() {
+async fn enabling_refine_preserves_existing_checkpoint_and_requires_new_job() {
     let temp_dir = TempDir::new().expect("create temp dir");
     let checkpoint_dir = temp_dir.path().join("checkpoints");
     let cache_dir = temp_dir.path().join("cache");
@@ -850,20 +850,20 @@ async fn enabling_refine_invalidates_completed_chapters() {
     config2.resume_job_id = Some(job_id);
     config2.refine = true;
 
-    translate_epub(&config2, &FakeTranslator, None, None)
+    let path = config2
+        .checkpoint_dir
+        .join(format!("{}.json", config2.resume_job_id.as_ref().unwrap()));
+    let before = std::fs::read(&path).unwrap();
+    let error = translate_epub(&config2, &FakeTranslator, None, None)
         .await
-        .expect("refine resume should succeed");
-
-    let content = read_chapter_content(&output2, "ch01");
-    assert!(
-        content.contains("<p lang=\"zh-CN\">[ZH] [ZH] Hello world</p>"),
-        "changed refinement setting must produce a refined chapter: {}",
-        content
-    );
+        .unwrap_err();
+    assert!(error.to_string().contains("incompatible"));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert!(!output2.exists());
 }
 
 #[tokio::test]
-async fn resume_retranslates_after_prompt_or_glossary_changes_and_ignores_legacy_content() {
+async fn resume_preserves_progress_after_prompt_glossary_or_unknown_legacy_settings() {
     struct PromptRecorder(Mutex<Vec<String>>);
     #[async_trait]
     impl Translator for PromptRecorder {
@@ -903,36 +903,36 @@ async fn resume_retranslates_after_prompt_or_glossary_changes_and_ignores_legacy
         .await
         .unwrap();
     assert_eq!(translator.0.lock().unwrap().len(), 1);
+    let job_id = find_job_id(&config.checkpoint_dir);
+    let path = config.checkpoint_dir.join(format!("{job_id}.json"));
+    let before = std::fs::read(&path).unwrap();
     config.system_prompt = Some("Updated instruction".into());
-    translate_epub(&config, &translator, None, None)
+    assert!(translate_epub(&config, &translator, None, None)
         .await
-        .unwrap();
-    assert_eq!(translator.0.lock().unwrap().len(), 2);
+        .is_err());
+    assert_eq!(translator.0.lock().unwrap().len(), 1);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
     config.glossary.push(babel_ebook::GlossaryEntry {
         term: "world".into(),
         translation: "世界".into(),
         context: None,
     });
-    translate_epub(&config, &translator, None, None)
+    assert!(translate_epub(&config, &translator, None, None)
         .await
-        .unwrap();
-    assert_eq!(translator.0.lock().unwrap().len(), 3);
-    assert!(translator.0.lock().unwrap()[2].contains("world => 世界"));
-    let job_id = find_job_id(&config.checkpoint_dir);
+        .is_err());
+    assert_eq!(translator.0.lock().unwrap().len(), 1);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
     let store = CheckpointStore::new(config.checkpoint_dir.clone()).unwrap();
     let mut legacy = store.load(&job_id).unwrap();
     legacy.translation_signature.clear();
-    legacy.chapters[0].content = Some(b"<p>LEGACY INVALID CONTENT</p>".to_vec());
+    legacy.compatibility_signature.clear();
     store.save(&legacy).unwrap();
-    translate_epub(&config, &translator, None, None)
+    let unknown = std::fs::read(&path).unwrap();
+    assert!(translate_epub(&config, &translator, None, None)
         .await
-        .unwrap();
-    assert!(!read_chapter_content(&output, "ch01").contains("LEGACY INVALID CONTENT"));
-    assert!(!store
-        .load(&job_id)
-        .unwrap()
-        .translation_signature
-        .is_empty());
+        .is_err());
+    assert_eq!(std::fs::read(path).unwrap(), unknown);
+    assert_eq!(translator.0.lock().unwrap().len(), 1);
 }
 
 /// A serialized R02-shaped checkpoint must retain its completed chapter in R04.

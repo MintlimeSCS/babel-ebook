@@ -42,9 +42,12 @@ pub struct Checkpoint {
     pub job_id: String,
     /// Hash of the source file used to detect changes.
     pub source_hash: String,
-    /// Versioned translation settings signature; legacy checkpoints are retranslated.
+    /// Legacy exact-settings identity; incompatible checkpoints are preserved.
     #[serde(default)]
     pub translation_signature: String,
+    /// R05 semantic settings identity; empty in legacy R02/R04 checkpoints.
+    #[serde(default)]
+    pub compatibility_signature: String,
     /// Original path to the source file.
     #[serde(default)]
     pub source_path: String,
@@ -63,13 +66,37 @@ impl CheckpointStore {
     /// Hash only output-affecting settings, never credentials or destination paths.
     #[must_use]
     pub fn translation_signature(config: &Config) -> String {
+        hex::encode(Sha256::digest(
+            Self::translation_settings(config).to_string().as_bytes(),
+        ))
+    }
+
+    /// Compare completed translations independently of request token limits.
+    /// Legacy checkpoints must first match their exact original settings.
+    ///
+    /// # Panics
+    /// Panics if the internal settings schema changes without updating its field indices.
+    #[must_use]
+    pub fn compatibility_signature(config: &Config) -> String {
+        let mut settings = Self::translation_settings(config);
+        let array = settings.as_array_mut().expect("settings are an array");
+        array[0] = "epub-resume-compatibility-r05".into();
+        if let Some(provider) = array[6].as_array_mut() {
+            provider.remove(3);
+        }
+        array.remove(8);
+        array.remove(7);
+        hex::encode(Sha256::digest(settings.to_string().as_bytes()))
+    }
+
+    fn translation_settings(config: &Config) -> serde_json::Value {
         let chapters: std::collections::BTreeMap<_, _> = config
             .chapter_prompts
             .keys()
             .map(|href| (href, config.system_prompt_for_chapter(href)))
             .collect();
         let provider = config.provider_config.as_ref();
-        let settings = serde_json::json!([
+        serde_json::json!([
             "epub-translation-v2",
             config.source_lang,
             config.target_lang,
@@ -98,8 +125,7 @@ impl CheckpointStore {
             config.preserve_classes,
             config.output_font,
             config.skip_doc_patterns
-        ]);
-        hex::encode(Sha256::digest(settings.to_string().as_bytes()))
+        ])
     }
     /// Create the store, ensuring the directory exists.
     ///
@@ -120,23 +146,61 @@ impl CheckpointStore {
     /// Load a checkpoint by job id if it exists.
     #[must_use]
     pub fn load(&self, job_id: &str) -> Option<Checkpoint> {
+        self.load_checked(job_id).unwrap_or_else(|error| {
+            tracing::warn!(job_id, %error, "checkpoint could not be loaded");
+            None
+        })
+    }
+
+    /// Load without treating corrupt or inaccessible existing data as a new job.
+    pub fn load_checked(&self, job_id: &str) -> Result<Option<Checkpoint>, BabelEbookError> {
         let path = self.path(job_id);
-        if !path.exists() {
-            return None;
-        }
         match std::fs::read_to_string(&path) {
-            Ok(content) => match serde_json::from_str(&content) {
-                Ok(cp) => Some(cp),
-                Err(err) => {
-                    tracing::warn!(job_id, error = %err, "failed to parse checkpoint; starting fresh");
-                    None
-                }
-            },
-            Err(err) => {
-                tracing::warn!(job_id, error = %err, "failed to read checkpoint; starting fresh");
-                None
-            }
+            Ok(content) => serde_json::from_str(&content).map(Some).map_err(|error| {
+                BabelEbookError::Configuration(format!(
+                    "Cannot parse checkpoint {}; existing progress was preserved: {error}",
+                    path.display()
+                ))
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(BabelEbookError::Configuration(format!(
+                "Cannot read checkpoint {}; existing progress was preserved: {error}",
+                path.display()
+            ))),
         }
+    }
+
+    /// Retain a pre-run snapshot; keep the latest three snapshots per job.
+    /// Backups are excluded from the desktop list by their subdirectory.
+    pub fn backup(&self, job_id: &str) -> Result<(), BabelEbookError> {
+        let source = self.path(job_id);
+        let result = (|| -> std::io::Result<()> {
+            if !source.exists() {
+                return Ok(());
+            }
+            let directory = self.dir.join("backups");
+            std::fs::create_dir_all(&directory)?;
+            let time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let destination = directory.join(format!("{job_id}-{time}.json"));
+            std::fs::copy(&source, &destination)?;
+            let prefix = format!("{job_id}-");
+            let mut snapshots: Vec<_> = std::fs::read_dir(directory)?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                .map(|entry| entry.path())
+                .collect();
+            snapshots.sort();
+            for path in snapshots.iter().take(snapshots.len().saturating_sub(3)) {
+                if let Err(error) = std::fs::remove_file(path) {
+                    tracing::warn!(%error, "Could not prune an old checkpoint backup");
+                }
+            }
+            Ok(())
+        })();
+        result.map_err(|error| BabelEbookError::Configuration(format!("Cannot back up checkpoint {}; translation stopped to preserve existing progress: {error}", source.display())))
     }
 
     /// Persist a checkpoint atomically (write temp + rename).
@@ -247,6 +311,7 @@ mod tests {
             job_id: "job-1".into(),
             source_hash: "hash".into(),
             translation_signature: "settings".into(),
+            compatibility_signature: String::new(),
             source_path: "input/book.epub".into(),
             chapters: vec![
                 ChapterCheckpoint {

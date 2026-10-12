@@ -38,6 +38,8 @@ pub struct PipelineResult {
     pub failures: Vec<(String, BabelEbookError)>,
     /// Updated chapters in original spine order.
     pub chapters: Vec<Chapter>,
+    /// Chapters restored before scheduling, including their local TOC labels.
+    pub restored: HashSet<usize>,
 }
 
 /// Translate chapters in index order while allowing `config.concurrency`
@@ -63,6 +65,7 @@ pub async fn run_ordered_pipeline(
         return Ok(PipelineResult {
             failures: Vec::new(),
             chapters: book.chapters.clone(),
+            restored: HashSet::new(),
         });
     }
 
@@ -75,13 +78,32 @@ pub async fn run_ordered_pipeline(
         &job_id,
         source_hash,
         &signature,
-    );
+        &CheckpointStore::compatibility_signature(context.config),
+    )?;
     checkpoint.source_path = context.config.source.to_string_lossy().into_owned();
     let completed = restore_completed_chapters(book, &indices, &checkpoint, context.progress);
     let pending_indices: Vec<usize> = indices
         .into_iter()
         .filter(|i| !completed.contains(i))
         .collect();
+
+    let options = context.config.translation_options();
+    for &index in &pending_indices {
+        options.validate_input_budget(
+            &options.system_prompt_for_chapter(&book.chapters[index].href),
+        )?;
+    }
+    if let Some(store) = checkpoint_store {
+        store.backup(&job_id)?;
+        // Migrate legacy settings before the first paid request, even if the
+        // remaining chapter fails. Never discard completed chapter contents.
+        store.save_async(&checkpoint).await?;
+    }
+    tracing::info!(
+        restored = completed.len(),
+        remaining = pending_indices.len(),
+        "R05 resume: completed chapters restored; only unfinished chapters scheduled"
+    );
 
     let checkpoint = Arc::new(tokio::sync::Mutex::new(checkpoint));
     let semaphore = Arc::new(Semaphore::new(context.config.concurrency.max(1)));
@@ -187,6 +209,7 @@ pub async fn run_ordered_pipeline(
             .map(|(_, href, err)| (href, err))
             .collect(),
         chapters: book.chapters.clone(),
+        restored: completed,
     })
 }
 
@@ -227,35 +250,54 @@ fn build_checkpoint(
     job_id: &str,
     source_hash: &str,
     signature: &str,
-) -> Checkpoint {
-    let loaded = checkpoint_store.and_then(|store| store.load(job_id));
+    compatibility_signature: &str,
+) -> Result<Checkpoint, BabelEbookError> {
+    let loaded = match checkpoint_store {
+        Some(store) => store.load_checked(job_id)?,
+        None => None,
+    };
     let mut checkpoint = if let Some(cp) = loaded {
-        if cp.source_hash != source_hash || cp.translation_signature != signature {
-            tracing::warn!(
-                job_id,
-                stored_hash = %cp.source_hash,
-                current_hash = %source_hash,
-                "source or translation settings changed; ignoring existing checkpoint"
-            );
-            Checkpoint {
-                job_id: job_id.to_string(),
-                source_hash: source_hash.to_string(),
-                translation_signature: signature.to_string(),
-                source_path: String::new(),
-                chapters: Vec::new(),
-            }
-        } else {
-            cp
+        let compatible = cp.translation_signature == signature
+            || (!cp.compatibility_signature.is_empty()
+                && cp.compatibility_signature == compatibility_signature);
+        if cp.source_hash != source_hash || !compatible {
+            let legacy_hint = if cp.compatibility_signature.is_empty() {
+                " Legacy R02/R04 records require their original model, prompt and token settings for the first R05 resume."
+            } else {
+                ""
+            };
+            return Err(BabelEbookError::Configuration(format!(
+                "Checkpoint {job_id} is incompatible with the current source or translation settings. Existing progress was preserved; no translation request was sent.{legacy_hint}"
+            )));
         }
+        for entry in cp
+            .chapters
+            .iter()
+            .filter(|entry| entry.status == ChapterStatus::Completed)
+        {
+            if entry.content.as_ref().is_none_or(Vec::is_empty)
+                || book
+                    .chapters
+                    .get(entry.index)
+                    .is_none_or(|chapter| chapter.href != entry.href)
+            {
+                return Err(BabelEbookError::Configuration(format!(
+                    "Checkpoint {job_id} contains an incomplete or mismatched completed chapter {}; existing progress was preserved", entry.href)));
+            }
+        }
+        cp
     } else {
         Checkpoint {
             job_id: job_id.to_string(),
             source_hash: source_hash.to_string(),
             translation_signature: signature.to_string(),
+            compatibility_signature: String::new(),
             source_path: String::new(),
             chapters: Vec::new(),
         }
     };
+    checkpoint.translation_signature = signature.to_string();
+    checkpoint.compatibility_signature = compatibility_signature.to_string();
 
     let existing_indices: HashSet<usize> = checkpoint.chapters.iter().map(|c| c.index).collect();
     for &index in indices {
@@ -270,7 +312,7 @@ fn build_checkpoint(
         }
     }
     checkpoint.chapters.sort_by_key(|c| c.index);
-    checkpoint
+    Ok(checkpoint)
 }
 
 fn restore_completed_chapters(
@@ -621,6 +663,7 @@ mod tests {
                 job_id: "resume-27".into(),
                 source_hash: "hash".into(),
                 translation_signature: signature.clone(),
+                compatibility_signature: String::new(),
                 source_path: String::new(),
                 chapters,
             })
@@ -680,6 +723,7 @@ mod tests {
                 job_id: job_id.clone(),
                 source_hash: "hash".into(),
                 translation_signature: CheckpointStore::translation_signature(&config),
+                compatibility_signature: String::new(),
                 source_path: config.source.to_string_lossy().into_owned(),
                 chapters: vec![
                     ChapterCheckpoint {
@@ -1036,5 +1080,206 @@ mod tests {
             assert_eq!(entry.status, ChapterStatus::Completed);
             assert!(entry.content.is_some());
         }
+    }
+
+    struct CountingFailure(AtomicUsize);
+
+    #[async_trait]
+    impl Translator for CountingFailure {
+        fn name(&self) -> String {
+            "r05-offline-failure".into()
+        }
+        fn max_output_tokens(&self) -> usize {
+            8000
+        }
+        async fn translate(
+            &self,
+            _: &str,
+            _: &TranslateContext<'_>,
+        ) -> Result<String, BabelEbookError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(BabelEbookError::ApiError("offline repeated failure".into()))
+        }
+    }
+
+    fn forty_completed(config: &Config, book: &EpubBook) -> Checkpoint {
+        Checkpoint {
+            job_id: "r05-40-of-41".into(),
+            source_hash: "unchanged-source".into(),
+            translation_signature: CheckpointStore::translation_signature(config),
+            compatibility_signature: String::new(),
+            source_path: String::new(),
+            chapters: (0..41)
+                .map(|index| ChapterCheckpoint {
+                    index,
+                    href: book.chapters[index].href.clone(),
+                    status: if index == 20 {
+                        ChapterStatus::Failed
+                    } else {
+                        ChapterStatus::Completed
+                    },
+                    content: (index != 20)
+                        .then(|| format!("<p>已完成章節 {index}</p>").into_bytes()),
+                    error: (index == 20).then(|| "prior failure".into()),
+                })
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn r05_keeps_forty_completed_after_repeated_failures_and_token_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(dir.path().join("checkpoints")).unwrap();
+        let cache = TranslationCache::new(dir.path().join("cache"));
+        let mut config = make_config();
+        config.max_input_tokens = 6000;
+        config.max_output_tokens = 8000;
+        let initial_book = make_book(vec!["unfinished text"; 41]);
+        let original = forty_completed(&config, &initial_book);
+        store.save(&original).unwrap();
+        let translator = CountingFailure(AtomicUsize::new(0));
+        for input in [6000, 4000, 2000, 3000] {
+            config.max_input_tokens = input;
+            let mut book = initial_book.clone();
+            let context = PipelineContext {
+                translator: &translator,
+                config: &config,
+                cache: &cache,
+                progress: None,
+                cancellation: None,
+            };
+            let result = run_ordered_pipeline(
+                &mut book,
+                (0..41).collect(),
+                &context,
+                Some(&store),
+                Some(&original.job_id),
+                "unchanged-source",
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.failures.len(), 1);
+            assert_eq!(result.restored.len(), 40);
+            let saved = store.load(&original.job_id).unwrap();
+            assert_eq!(
+                saved
+                    .chapters
+                    .iter()
+                    .filter(|entry| entry.status == ChapterStatus::Completed)
+                    .count(),
+                40
+            );
+            assert_eq!(saved.chapters[20].status, ChapterStatus::Failed);
+            assert!(!saved.compatibility_signature.is_empty());
+            for entry in original.chapters.iter().filter(|entry| entry.index != 20) {
+                assert_eq!(saved.chapters[entry.index].content, entry.content);
+            }
+        }
+        assert_eq!(translator.0.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("checkpoints/backups"))
+                .unwrap()
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn r05_rejects_legacy_token_mismatch_and_prompt_change_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(dir.path().to_path_buf()).unwrap();
+        let cache = TranslationCache::new(dir.path().join("cache"));
+        let mut config = make_config();
+        config.max_input_tokens = 6000;
+        let mut book = make_book(vec!["unfinished text"; 41]);
+        let mut cp = forty_completed(&config, &book);
+        store.save(&cp).unwrap();
+        let translator = CountingFailure(AtomicUsize::new(0));
+        for migrated in [false, true] {
+            config.max_input_tokens = 6000;
+            if migrated {
+                cp.compatibility_signature = CheckpointStore::compatibility_signature(&config);
+                store.save(&cp).unwrap();
+            }
+            let before = std::fs::read(dir.path().join("r05-40-of-41.json")).unwrap();
+            if migrated {
+                config.system_prompt = Some("a different prompt".into());
+            } else {
+                config.max_input_tokens = 2000;
+            }
+            let context = PipelineContext {
+                translator: &translator,
+                config: &config,
+                cache: &cache,
+                progress: None,
+                cancellation: None,
+            };
+            let error = run_ordered_pipeline(
+                &mut book,
+                (0..41).collect(),
+                &context,
+                Some(&store),
+                Some(&cp.job_id),
+                "unchanged-source",
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(error.to_string().contains("preserved"));
+            assert_eq!(
+                std::fs::read(dir.path().join("r05-40-of-41.json")).unwrap(),
+                before
+            );
+        }
+        assert_eq!(translator.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn r05_corrupt_record_and_insufficient_prompt_budget_never_reset_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(dir.path().to_path_buf()).unwrap();
+        let cache = TranslationCache::new(dir.path().join("cache"));
+        let mut config = make_config();
+        config.max_input_tokens = 2000;
+        config.system_prompt = Some("Very long translation instruction. ".repeat(1000));
+        let mut book = make_book(vec!["unfinished text"; 41]);
+        let cp = forty_completed(&config, &book);
+        store.save(&cp).unwrap();
+        let path = dir.path().join("r05-40-of-41.json");
+        let before = std::fs::read(&path).unwrap();
+        let translator = CountingFailure(AtomicUsize::new(0));
+        let context = PipelineContext {
+            translator: &translator,
+            config: &config,
+            cache: &cache,
+            progress: None,
+            cancellation: None,
+        };
+        let error = run_ordered_pipeline(
+            &mut book,
+            (0..41).collect(),
+            &context,
+            Some(&store),
+            Some(&cp.job_id),
+            "unchanged-source",
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("too small"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::write(&path, b"broken JSON").unwrap();
+        assert!(run_ordered_pipeline(
+            &mut book,
+            (0..41).collect(),
+            &context,
+            Some(&store),
+            Some(&cp.job_id),
+            "unchanged-source"
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken JSON");
+        assert_eq!(translator.0.load(Ordering::SeqCst), 0);
     }
 }

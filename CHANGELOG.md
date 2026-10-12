@@ -1,3 +1,13 @@
+# Custom revision R05 — 2026-10-12 (app 0.5.2)
+
+- Preserve incompatible, unreadable and corrupt checkpoints instead of silently resetting the same JSON file. Keep three pre-run backup snapshots per job.
+- Migrate R02/R04 checkpoints only after their exact original settings match; record R05 semantic compatibility so later input/output token changes preserve completed chapters. Model, endpoint, language, temperature, prompt, glossary, refine and output-scope changes remain incompatible.
+- Promote validated R04 cache hits into the token-independent R05 cache namespace. Recover completed chapter TOC labels locally without new title requests.
+- Save already-received OpenAI-compatible length responses locally, with actual source payload, response/usage, request ID, token limits and recovery location. No extra API requests, credentials or system prompt text.
+- Bound truncation diagnostics to 50 files / 10 MiB; expose the absolute path in the failure message. Retain the existing recovery request and output-token limits.
+- Reject input limits that cannot hold the effective prompt plus a safe source budget before paid translation or checkpoint updates.
+- Add source/settings distinction and legacy migration guidance to the resume UI. Use R05 / 0.5.2 identifiers and retain the app identifier and pinned Rust 1.90.0 Windows build fix.
+
 # Custom revision R04 — 2026-10-09 (app 0.5.1)
 
 - Base this revision on R02; exclude the rolled-back R03 feature changes.

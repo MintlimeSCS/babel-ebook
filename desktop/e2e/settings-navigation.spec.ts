@@ -84,7 +84,9 @@ test("loads persisted checkpoints and allows selecting a resume record", async (
   await expect(checkpoint).toBeVisible({ timeout: 15000 });
   await expect(checkpoint).toContainText("Dead Mountain checkpoint fixture.epub");
   await expect(page.getByTestId("checkpoint-item-checkpoint-other-book")).toHaveCount(0);
+  await expect(page.getByTestId("checkpoint-settings-guard")).toBeVisible();
   await checkpoint.click();
+  await expect(page.getByTestId("checkpoint-legacy-hint")).toBeVisible();
   await expect(page.getByTestId("clear-resume-selection")).toBeVisible();
   await page.getByTestId("clear-resume-selection").click();
   await page.locator(".file-row-source .icon-button").click();
@@ -192,6 +194,6 @@ test("About shows the custom program revision", async () => {
   const browser = await chromium.connectOverCDP(cdpUrl);
   const page = browser.contexts()[0].pages()[0];
   await page.getByRole("button", { name: "About", exact: true }).click();
-  await expect(page.locator(".about-page")).toContainText("R04");
+  await expect(page.locator(".about-page")).toContainText("R05");
   await browser.close();
 });

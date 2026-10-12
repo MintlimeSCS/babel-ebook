@@ -157,6 +157,7 @@ pub(super) async fn openai_compatible_translate_with_format(
     });
     let mut request =
         build_chat_completion_request(model, system_prompt, text, max_tokens, temperature);
+    let diagnostic = crate::diagnostics::begin_request();
     if let Some(format) = response_format {
         request["response_format"] = format;
     }
@@ -198,7 +199,30 @@ pub(super) async fn openai_compatible_translate_with_format(
             BabelEbookError::ApiError(format!("{provider_name} response read failed: {error}"))
         })?;
         if status.is_success() {
-            return extract_chat_content(&body, provider_name);
+            let result = extract_chat_content(&body, provider_name);
+            if let Err(BabelEbookError::OutputTruncated(message)) = result {
+                let request_id = headers
+                    .get("x-request-id")
+                    .and_then(|value| value.to_str().ok());
+                let path = crate::diagnostics::save_truncation(
+                    diagnostic.as_ref(),
+                    &request,
+                    system_prompt,
+                    text,
+                    &body,
+                    request_id,
+                    attempt,
+                )
+                .await;
+                let detail = path.map_or_else(
+                    || "; R05 diagnostic unavailable".to_string(),
+                    |path| format!("; diagnostic={}", path.display()),
+                );
+                return Err(BabelEbookError::OutputTruncated(format!(
+                    "{message}{detail}"
+                )));
+            }
+            return result;
         }
         let error = format_http_error(provider_name, status, &body);
         if status == StatusCode::TOO_MANY_REQUESTS {
@@ -1139,6 +1163,78 @@ mod tests {
             .is_err());
             server.await.unwrap();
             assert_eq!(calls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn r05_records_truncation_for_both_models_without_extra_requests_or_secrets() {
+        for model in ["gpt-4.1-mini-2025-04-14", "gpt-5.4-mini-2026-03-17"] {
+            let truncated = serde_json::json!({
+                "model": model,
+                "choices": [{"message": {"content": "LOMBROSO ".repeat(100)}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 3256, "completion_tokens": 8000,
+                    "completion_tokens_details": {"reasoning_tokens": 0}}
+            }).to_string();
+            let (url, calls, server) =
+                mock_chat_server(vec![(200, "x-request-id: r05-local-test\r\n", truncated)]).await;
+            let client = Client::with_config(
+                OpenAIConfig::new()
+                    .with_api_key("fake-key-not-for-storage")
+                    .with_api_base(url),
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let location = crate::diagnostics::DiagnosticContext::new(
+                dir.path().join("diagnostics-r05"),
+                "chapter12.xhtml",
+                Some(31),
+                1,
+                6000,
+                "translate",
+            );
+            let result = crate::diagnostics::capture(location, async {
+                crate::diagnostics::source_depth(1);
+                crate::diagnostics::fragment_range(1, 2, 0);
+                openai_compatible_translate(
+                    &client,
+                    model,
+                    "SYSTEM PROMPT MUST NOT BE STORED",
+                    "LOMBROSO",
+                    8000,
+                    0.3,
+                    "OpenAI",
+                )
+                .await
+            })
+            .await;
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("diagnostic="));
+            assert!(error.contains("completion_tokens=8000"));
+            server.await.unwrap();
+            assert_eq!(calls.lock().unwrap().len(), 1);
+            let files: Vec<_> = std::fs::read_dir(dir.path().join("diagnostics-r05"))
+                .unwrap()
+                .flatten()
+                .collect();
+            assert_eq!(files.len(), 1);
+            let bytes = std::fs::read_to_string(files[0].path()).unwrap();
+            assert!(!bytes.contains("fake-key-not-for-storage"));
+            assert!(!bytes.contains("SYSTEM PROMPT MUST NOT BE STORED"));
+            let record: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+            assert_eq!(record["selected_element"], 31);
+            assert_eq!(record["usage"]["completion_tokens"], 8000);
+            assert_eq!(record["recovery"]["source_split_depth"], 1);
+            assert_eq!(record["request_id"], "r05-local-test");
+            assert_eq!(record["partial_response_cached"], false);
+            assert!(record["raw_response"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("LOMBROSO"));
+            let limit_field = if model.starts_with("gpt-5") {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
+            assert_eq!(record[limit_field], 8000);
         }
     }
 }

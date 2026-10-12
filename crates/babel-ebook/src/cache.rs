@@ -19,6 +19,15 @@ struct CacheEntry {
 }
 
 impl TranslationCache {
+    /// Failure diagnostics remain available even when successful caching is disabled.
+    pub(crate) fn diagnostic_directory(&self) -> PathBuf {
+        let directory = if self.dir.is_absolute() {
+            self.dir.clone()
+        } else {
+            std::env::current_dir().map_or_else(|_| self.dir.clone(), |cwd| cwd.join(&self.dir))
+        };
+        directory.join("diagnostics-r05")
+    }
     /// Initialize the cache, creating the directory if needed.
     ///
     /// If the cache directory cannot be created, the cache is disabled and I/O

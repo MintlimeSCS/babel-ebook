@@ -331,5 +331,7 @@
   "glossary_translation": "指定譯名",
   "glossary_context": "適用語境（選填）",
   "glossary_add": "新增詞彙",
-  "glossary_remove": "刪除此項"
+  "glossary_remove": "刪除此項",
+  "checkpoint_settings_guard": "此处仅确认源文件匹配。开始前将另行检查翻译设置；不相容时保留原进度并停止。",
+  "checkpoint_legacy_hint": "旧记录首次使用 R05 续译时，请保持原模型、提示词及 Token 设置。验证保存后，调整 Token 不会重置已完成章节。"
 }
