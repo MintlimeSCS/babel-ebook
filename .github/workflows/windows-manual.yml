@@ -1,4 +1,4 @@
-name: Build Windows installer R04
+name: Build Windows installer R05
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      # Match the toolchain used to validate this R04 release.
+      # Match the toolchain used to validate this R05 release.
       - name: Install Rust 1.90.0
         uses: dtolnay/rust-toolchain@1.90.0
         with:
@@ -49,7 +49,7 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: BabelEbook-Windows-R04
+          name: BabelEbook-Windows-R05
           path: target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
           retention-days: 14
